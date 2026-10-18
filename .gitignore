@@ -1,2 +1,7 @@
 spectrum-ts/
 .env
+.env.*
+!.env.example
+node_modules/
+.data/
+contacts.json

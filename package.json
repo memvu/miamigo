@@ -1,7 +1,27 @@
 {
+  "name": "miamigo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "test": "bun test src scripts",
+    "typecheck": "tsc --noEmit",
+    "setup": "bun run scripts/setup-assistant.ts",
+    "list-chats": "bun run scripts/list-chats.ts",
+    "eval": "bun run scripts/eval.ts"
+  },
   "dependencies": {
-    "@spectrum-ts/imessage-local": "^12.11.0",
+    "@photon-ai/imessage-kit": "3.0.0",
     "backboard-sdk": "^1.5.19",
-    "spectrum-ts": "^12.11.0"
+    "chrono-node": "^2.9.0",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "bun-types": "^1.4.3",
+    "typescript": "^7.0.2"
+  },
+  "patchedDependencies": {
+    "@photon-ai/imessage-kit@3.0.0": "patches/@photon-ai%2Fimessage-kit@3.0.0.patch"
   }
 }

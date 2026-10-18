@@ -1,0 +1,75 @@
+diff --git a/node_modules/@photon-ai/imessage-kit/.bun-tag-da3b5668cce19e8a b/.bun-tag-da3b5668cce19e8a
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 8e4c7331515a94de5de52e012e90b8a1b7048f80..41038d641ec7576cb0c313c26533a382bafd2bd6 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -1358,6 +1358,7 @@ var MessageWatchSource = class {
+   hasPendingTrigger = false;
+   walWatcher = null;
+   dirWatcher = null;
++  pollTimer;
+   /**
+    * Handle to the running consumer loop. `stop()` awaits this to guarantee
+    * that no `onBatch` (= plugin dispatch) is in flight after stop resolves —
+@@ -1387,6 +1388,7 @@ var MessageWatchSource = class {
+       this.ensureWatching();
+       this.trigger();
+       this.consumePromise = this.consumeLoop();
++      this.pollTimer = setInterval(() => this.trigger(), 1000);
+     } catch (error) {
+       this.isRunning = false;
+       this.detachWALWatcher();
+@@ -1405,6 +1407,7 @@ var MessageWatchSource = class {
+   async stop() {
+     if (!this.isRunning && !this.consumePromise) return;
+     this.isRunning = false;
++    clearInterval(this.pollTimer);
+     this.detachWALWatcher();
+     this.detachDirWatcher();
+     if (this.triggerResolve) {
+@@ -2258,6 +2261,7 @@ var IMessageSDK = class {
+     const semaphore = new Semaphore(maxConcurrentSends);
+     this.sender = new MessageSender({
+       semaphore,
++      retryAttempts: 1,
+       debug: this.debug,
+       timeout: sendTimeout,
+       signal: this.abortController.signal
+diff --git a/dist/index.js b/dist/index.js
+index 184d04c52ade362b80f24aa65b7c91ceff2c1ee3..1f53c8013aeb63c20f1d6505257d42f8b4ea1ae4 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1355,6 +1355,7 @@ var MessageWatchSource = class {
+   hasPendingTrigger = false;
+   walWatcher = null;
+   dirWatcher = null;
++  pollTimer;
+   /**
+    * Handle to the running consumer loop. `stop()` awaits this to guarantee
+    * that no `onBatch` (= plugin dispatch) is in flight after stop resolves —
+@@ -1384,6 +1385,7 @@ var MessageWatchSource = class {
+       this.ensureWatching();
+       this.trigger();
+       this.consumePromise = this.consumeLoop();
++      this.pollTimer = setInterval(() => this.trigger(), 1000);
+     } catch (error) {
+       this.isRunning = false;
+       this.detachWALWatcher();
+@@ -1402,6 +1404,7 @@ var MessageWatchSource = class {
+   async stop() {
+     if (!this.isRunning && !this.consumePromise) return;
+     this.isRunning = false;
++    clearInterval(this.pollTimer);
+     this.detachWALWatcher();
+     this.detachDirWatcher();
+     if (this.triggerResolve) {
+@@ -2255,6 +2258,7 @@ var IMessageSDK = class {
+     const semaphore = new Semaphore(maxConcurrentSends);
+     this.sender = new MessageSender({
+       semaphore,
++      retryAttempts: 1,
+       debug: this.debug,
+       timeout: sendTimeout,
+       signal: this.abortController.signal

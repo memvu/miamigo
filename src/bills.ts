@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { writeFileSync } from "node:fs";
 import type {
   ActionResult,
   ChatContext,
@@ -66,7 +67,7 @@ function splitEventKey(
 
 function nudgeEventKey(
   billId: number,
-  stage: 1 | 2,
+  stage: number,
   handle: string,
   revision: number,
   amountCents: number,
@@ -214,7 +215,7 @@ function participantByIdentity(
   return { error: `I don't know participant ${identifier}.` };
 }
 
-function displayName(handle: string, participants: Participant[]): string {
+function displayName(handle: string, participants: readonly Participant[]): string {
   return (
     participants.find((participant) => participant.handle === handle)?.name ||
     handle
@@ -523,6 +524,11 @@ export class Billing {
         return this.settleBill(ctx);
       case "forgive_share":
         return this.forgiveShare(args, ctx);
+      case "export_spreadsheet":
+      case "get_spreadsheet":
+        return this.exportSpreadsheet(ctx);
+      case "nudge_debtors":
+        return this.nudgeUnpaid(ctx);
       default:
         return resultError(`Unknown billing action: ${name}`);
     }
@@ -563,6 +569,7 @@ export class Billing {
           payerBill.id,
           reportedIdentity.handle,
           ctx.now,
+          ctx.participants,
         );
       }
     }
@@ -583,9 +590,39 @@ export class Billing {
     }
     const bill = this.latestOpenBillFor(ctx.chatId, actor);
     if (!bill) {
+      if (payerBill && actor === payerBill.payer_handle) {
+        return {
+          emissions: [
+            {
+              chatId: ctx.chatId,
+              text: `You're the payer for ${payerBill.label} — you don't owe anything! Use /paid <name> to mark someone else as paid.`,
+              key: `bill:${payerBill.id}:payer_paid_notice:${message.id}`,
+            },
+          ],
+        };
+      }
+      if (payerBill) {
+        const share = this.db
+          .query<ShareRow, [number, string]>(
+            "SELECT * FROM bill_shares WHERE bill_id = ? AND handle = ?",
+          )
+          .get(payerBill.id, actor);
+        if (share && share.paid_at !== null) {
+          const debtorName = this.displayForChat(actor, ctx.participants);
+          return {
+            emissions: [
+              {
+                chatId: ctx.chatId,
+                text: `@${debtorName} is already marked as paid for ${payerBill.label}!`,
+                key: `bill:${payerBill.id}:already_paid:${actor}:${message.id}`,
+              },
+            ],
+          };
+        }
+      }
       return null;
     }
-    return this.markSharePaid(bill.id, actor, ctx.now);
+    return this.markSharePaid(bill.id, actor, ctx.now, ctx.participants);
   }
 
   observe(ctx: ChatContext, decision: Classification): ActionResult | null {
@@ -639,7 +676,7 @@ export class Billing {
     if (!bill || participant === bill.payer_handle) {
       return null;
     }
-    return this.markSharePaid(bill.id, participant, ctx.now);
+    return this.markSharePaid(bill.id, participant, ctx.now, ctx.participants);
   }
 
   tick(ctx: ChatContext): ActionResult {
@@ -1039,19 +1076,24 @@ export class Billing {
       this.db
         .query(
           `INSERT OR IGNORE INTO bill_reminders (bill_id, handle, stage, due_at)
-           VALUES (?, ?, 1, ?), (?, ?, 2, ?)`,
+           VALUES (?, ?, 1, ?), (?, ?, 2, ?), (?, ?, 3, ?), (?, ?, 4, ?)`,
         )
         .run(
           bill.id,
           share.handle,
-          bill.created_at + DAY_MS,
+          bill.created_at + 1 * (process.env.BILL_REMINDER_MINUTES ? Number(process.env.BILL_REMINDER_MINUTES) * 60_000 : DAY_MS),
           bill.id,
           share.handle,
-          bill.created_at + 3 * DAY_MS,
+          bill.created_at + 3 * (process.env.BILL_REMINDER_MINUTES ? Number(process.env.BILL_REMINDER_MINUTES) * 60_000 : DAY_MS),
+          bill.id,
+          share.handle,
+          bill.created_at + 5 * (process.env.BILL_REMINDER_MINUTES ? Number(process.env.BILL_REMINDER_MINUTES) * 60_000 : DAY_MS),
+          bill.id,
+          share.handle,
+          bill.created_at + 7 * (process.env.BILL_REMINDER_MINUTES ? Number(process.env.BILL_REMINDER_MINUTES) * 60_000 : DAY_MS),
         );
     }
   }
-
   private renderSplit(
     ctx: ChatContext,
     bill: SplitBillRow,
@@ -1128,6 +1170,200 @@ export class Billing {
       data: { billId: bill.id, shares: this.shareData(shares) },
     };
   }
+  private exportSpreadsheet(ctx: ChatContext): ActionResult {
+    const bills = this.db
+      .query<SplitBillRow, [string]>(
+        "SELECT * FROM bills WHERE chat_id = ? ORDER BY id ASC",
+      )
+      .all(ctx.chatId);
+    if (bills.length === 0) {
+      return {
+        emissions: [
+          {
+            chatId: ctx.chatId,
+            text: "📊 No bills recorded yet. Split a bill first with /split 50 or say 'dinner was $50, I paid'.",
+            key: `bill:sheet:none:${ctx.now}`,
+          },
+        ],
+      };
+    }
+
+    const csvRows: string[] = [
+      "Bill ID,Description,Total Amount,Payer,Participant,Share Amount,Status,Date",
+    ];
+    let totalCentsAllBills = 0;
+    let totalOutstandingCents = 0;
+    const summaryRows: {
+      label: string;
+      payer: string;
+      debtor: string;
+      amount: string;
+      status: string;
+    }[] = [];
+
+    for (const bill of bills) {
+      const billTotal = bill.total_cents + bill.tip_cents;
+      totalCentsAllBills += billTotal;
+      const payerName = this.displayForChat(bill.payer_handle, ctx.participants);
+      const shares = this.sharesFor(bill.id);
+      const dateStr = new Date(bill.created_at).toLocaleDateString("en-US", {
+        timeZone: ctx.tz,
+      });
+
+      for (const share of shares) {
+        const participantName = this.displayForChat(share.handle, ctx.participants);
+        const shareAmountStr = money(share.amount_cents);
+        const isPayer = share.handle === bill.payer_handle;
+        const isPaid = isPayer || share.paid_at !== null;
+        const statusStr = isPayer ? "Paid (Payer)" : isPaid ? "Paid" : "Unpaid";
+
+        if (!isPaid) {
+          totalOutstandingCents += share.amount_cents;
+        }
+
+        const escape = (val: string) => `"${val.replace(/"/g, '""')}"`;
+        csvRows.push(
+          [
+            bill.id,
+            escape(bill.label),
+            escape(money(billTotal)),
+            escape(payerName),
+            escape(participantName),
+            escape(shareAmountStr),
+            statusStr,
+            dateStr,
+          ].join(","),
+        );
+
+        if (!isPayer && summaryRows.length < 15) {
+          summaryRows.push({
+            label: bill.label.slice(0, 12),
+            payer: payerName.slice(0, 10),
+            debtor: participantName.slice(0, 10),
+            amount: shareAmountStr,
+            status: isPaid ? "Paid" : "Unpaid",
+          });
+        }
+      }
+    }
+
+    const safeChatId = ctx.chatId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const csvPath = `/tmp/miamigo-expenses-${safeChatId}.csv`;
+    writeFileSync(csvPath, csvRows.join("\n"), "utf8");
+
+    const tableHeader = "Description  | Payer      | Debtor     | Amount  | Status";
+    const tableDivider = "-------------+------------+------------+---------+-------";
+    const tableLines = summaryRows.map((r) =>
+      `${r.label.padEnd(12)} | ${r.payer.padEnd(10)} | ${r.debtor.padEnd(10)} | ${r.amount.padStart(7)} | ${r.status}`,
+    );
+
+    const visualText = [
+      "📊 Expenses Spreadsheet",
+      tableDivider,
+      tableHeader,
+      tableDivider,
+      ...tableLines,
+      tableDivider,
+      `Total Expenses: ${money(totalCentsAllBills)}`,
+      `Total Outstanding: ${money(totalOutstandingCents)}`,
+      "(Attached: miamigo-expenses.csv — open in Numbers or Excel)",
+    ].join("\n");
+
+    return {
+      emissions: [
+        {
+          chatId: ctx.chatId,
+          text: visualText,
+          key: `bill:sheet:${ctx.chatId}:${ctx.now}`,
+          attachments: [csvPath],
+        },
+      ],
+      data: {
+        csvPath,
+        billCount: bills.length,
+        totalCentsAllBills,
+        totalOutstandingCents,
+      },
+    };
+  }
+
+  private nudgeUnpaid(ctx: ChatContext): ActionResult {
+    const openBills = this.db
+      .query<SplitBillRow, [string]>(
+        "SELECT * FROM bills WHERE chat_id = ? AND status = 'open' ORDER BY id ASC",
+      )
+      .all(ctx.chatId);
+    if (openBills.length === 0) {
+      return {
+        emissions: [
+          {
+            chatId: ctx.chatId,
+            text: "✅ No open bills! Everyone is settled up.",
+            key: `bill:nudge:none:${ctx.now}`,
+          },
+        ],
+      };
+    }
+
+    const debtorMap = new Map<
+      string,
+      { debtor: string; payer: string; amountCents: number; labels: string[] }
+    >();
+
+    for (const bill of openBills) {
+      const shares = this.sharesFor(bill.id);
+      const unpaid = shares.filter(
+        (s) => s.handle !== bill.payer_handle && s.amount_cents > 0 && s.paid_at === null,
+      );
+      for (const share of unpaid) {
+        const key = `${share.handle}->${bill.payer_handle}`;
+        const existing = debtorMap.get(key);
+        if (existing) {
+          existing.amountCents += share.amount_cents;
+          if (!existing.labels.includes(bill.label)) {
+            existing.labels.push(bill.label);
+          }
+        } else {
+          debtorMap.set(key, {
+            debtor: this.displayForChat(share.handle, ctx.participants),
+            payer: this.displayForChat(bill.payer_handle, ctx.participants),
+            amountCents: share.amount_cents,
+            labels: [bill.label],
+          });
+        }
+      }
+    }
+
+    if (debtorMap.size === 0) {
+      return {
+        emissions: [
+          {
+            chatId: ctx.chatId,
+            text: "✅ All open bills are already paid up!",
+            key: `bill:nudge:settled:${ctx.now}`,
+          },
+        ],
+      };
+    }
+
+    const lines: string[] = ["💸 Friendly Payment Reminders:"];
+    for (const item of debtorMap.values()) {
+      lines.push(
+        `• @${item.debtor} owes @${item.payer} ${money(item.amountCents)} (${item.labels.join(", ")})`,
+      );
+    }
+    lines.push('Pay via your payment app, then reply "paid" or /paid [name].');
+
+    return {
+      emissions: [
+        {
+          chatId: ctx.chatId,
+          text: lines.join("\n"),
+          key: `bill:nudge:manual:${ctx.now}`,
+        },
+      ],
+    };
+  }
 
   private markPaidCommand(
     args: Record<string, unknown>,
@@ -1153,7 +1389,7 @@ export class Billing {
     if (target === bill.payer_handle) {
       return resultError("The payer does not owe themselves.");
     }
-    return this.markSharePaid(bill.id, target, ctx.now);
+    return this.markSharePaid(bill.id, target, ctx.now, ctx.participants);
   }
 
   private adjustShareCommand(
@@ -1321,7 +1557,7 @@ export class Billing {
       if (ctx.actor !== target && ctx.actor !== bill.payer_handle) {
         continue;
       }
-      emissions.push(...this.markSharePaid(billId, target, ctx.now).emissions);
+      emissions.push(...this.markSharePaid(billId, target, ctx.now, ctx.participants).emissions);
     }
     return emissions.length > 0 ? { emissions } : null;
   }
@@ -1362,6 +1598,7 @@ export class Billing {
     billId: number,
     target: string,
     now: number,
+    participants?: readonly Participant[],
   ): ActionResult {
     const bill = this.billById(billId);
     const share = this.db
@@ -1372,16 +1609,49 @@ export class Billing {
     if (bill?.status !== "open" || !share || target === bill.payer_handle) {
       return resultError("That participant does not owe this bill.");
     }
+    const debtorName = participants
+      ? this.displayForChat(target, participants)
+      : target;
     if (share.paid_at !== null) {
-      return { emissions: [], data: { billId, handle: target, paid: true } };
+      return {
+        emissions: [
+          {
+            chatId: bill.chat_id,
+            key: `bill:${bill.id}:already_paid:${target}`,
+            text: `@${debtorName} is already marked as paid for ${bill.label}!`,
+          },
+        ],
+        data: { billId, handle: target, paid: true },
+      };
     }
     this.db
       .query(
         "UPDATE bill_shares SET paid_at = ?, forgiven_at = NULL WHERE bill_id = ? AND handle = ?",
       )
       .run(now, billId, target);
+
+    const settleEmissions = this.settleIfComplete(billId, now);
+    if (settleEmissions.length > 0) {
+      return {
+        emissions: [
+          {
+            chatId: bill.chat_id,
+            key: `bill:${bill.id}:paid:${target}:${now}`,
+            text: `Got it, marked @${debtorName} as paid (${money(share.amount_cents)})!\n${settleEmissions[0].text}`,
+          },
+        ],
+        data: { billId, handle: target, paid: true },
+      };
+    }
+
     return {
-      emissions: this.settleIfComplete(billId, now),
+      emissions: [
+        {
+          chatId: bill.chat_id,
+          key: `bill:${bill.id}:paid:${target}:${now}`,
+          text: `Got it, marked @${debtorName} as paid (${money(share.amount_cents)}) for ${bill.label}!`,
+        },
+      ],
       data: { billId, handle: target, paid: true },
     };
   }
@@ -1714,11 +1984,11 @@ export class Billing {
     return this.hasParticipant(ctx.participants, handle) ? handle : null;
   }
 
-  private hasParticipant(participants: Participant[], handle: string): boolean {
+  private hasParticipant(participants: readonly Participant[], handle: string): boolean {
     return participants.some((participant) => participant.handle === handle);
   }
 
-  private displayForChat(handle: string, participants: Participant[]): string {
+  private displayForChat(handle: string, participants: readonly Participant[]): string {
     return displayName(handle, participants);
   }
 
@@ -1815,6 +2085,32 @@ export const billingTools: ToolDefinition[] = [
     function: {
       name: "get_balances",
       description: "Show the current bill balances and paid debtors.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {},
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "export_spreadsheet",
+      description:
+        "Generate and send an Excel/CSV spreadsheet attachment of all bills, shares, and balances.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {},
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "nudge_debtors",
+      description:
+        "Send friendly reminders to all participants who still owe money on open bills.",
       parameters: {
         type: "object",
         additionalProperties: false,

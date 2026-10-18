@@ -3,21 +3,20 @@ import {
   BackboardClient,
   BackboardNotFoundError,
   type ChatMessagesResponse,
-  type ToolCall,
 } from "backboard-sdk";
 import { z } from "zod";
 import type {
-  ActionResult,
   AIConfig,
   ChatContext,
   Classification,
+  Decision,
   Stage,
   ToolDefinition,
   ToolIntent,
 } from "./contracts";
 
-const CALL_TIMEOUT_MS = 15_000;
-const MAX_TOOL_ROUNDS = 4;
+// Enforced by withTimeout: the SDK's own timeout option is ignored by node-fetch v3.
+const CALL_TIMEOUT_MS = 30_000;
 const RECENT_MESSAGE_LIMIT = 20;
 const STAGES = [
   "idea",
@@ -61,6 +60,10 @@ const extractedSchema = z
       .nullish()
       .transform((value) => value ?? undefined),
     objection: z.boolean().optional(),
+    memories: z
+      .array(z.string().trim().min(1))
+      .nullish()
+      .transform((value) => value ?? undefined),
   })
   .strict();
 
@@ -90,6 +93,20 @@ export const classifierSchema = z
   })
   .strict();
 
+/** The classifier contract plus the one action the app should run locally. */
+export const decisionSchema = classifierSchema
+  .extend({
+    action: z
+      .object({
+        name: z.string().trim().min(1),
+        args: z.record(z.string(), z.unknown()).optional(),
+      })
+      .strict()
+      .nullish()
+      .transform((value) => value ?? null),
+  })
+  .strict();
+
 const CLASSIFIER_SCHEMA_DESCRIPTION = `{
   "is_planning": boolean,
   "confidence": number from 0 to 1,
@@ -105,7 +122,8 @@ const CLASSIFIER_SCHEMA_DESCRIPTION = `{
     "title": "optional title" or null,
     "location": "optional location" or null,
     "starts_at": "optional date/time text" or null,
-    "objection": boolean
+    "objection": boolean,
+    "memories": ["any newly learned permanent dietary rules, allergies, or preferences from messages, e.g. 'Alex is vegan'"]
   },
   "bill": {
     "is_shared_expense": boolean,
@@ -116,11 +134,12 @@ const CLASSIFIER_SCHEMA_DESCRIPTION = `{
     "confidence": number from 0 to 1,
     "paid_by": ["participant handles"],
     "fixed_shares": {"participant handle": number}
-  }
+  },
+  "action": {"name": "tool name from the tool catalog", "args": {tool arguments}} or null
 }`;
 
-/** Classifier instructions include examples so short bursts are interpreted conservatively. */
-export const CLASSIFIER_SYSTEM_PROMPT = `You classify one conversation context from a group chat for Mi Amigo.
+/** Decider instructions include examples so short bursts are interpreted conservatively. */
+const DECIDER_RULES = `You classify one conversation context from a group chat for Mi Amigo and choose the single action the app should take.
 Return exactly one JSON object matching this schema and no Markdown:
 ${CLASSIFIER_SCHEMA_DESCRIPTION}
 Use participant handles exactly as supplied in the context, never display names or invented identities.
@@ -128,35 +147,54 @@ Set should_speak false for ordinary banter, sarcasm, acknowledgements, or an act
 Set should_speak true when someone proposes, suggests, or asks for a plan (e.g. "plan dinner", "food this weekend", "let's hang"), or when there is a concrete stall, conflict, convergence, or high-confidence shared bill. Do not wait for other people to reply before speaking—help kick off the plan immediately and ask who wants to join so the suggestion doesn't get left on read.
 Extract interest and availability even when should_speak is false. Never infer agreement from silence.
 Use recent_messages as context only.
+Choose action from the tool catalog below. The app is the source of truth and renders every reply with fixed templates, so never write user-facing text.
+Use only participants, times, places, and amounts present in the context. Do not calculate money yourself.
+Set action to null when no action is justified. Choose at most one action and keep its args valid for that tool's parameters.
+When explicit is true, someone addressed the bot directly: choose the action that answers their request even if should_speak is false.
+When someone suggests a plan (e.g. "Plan dinner", "let's hang"), choose create_poll asking who is joining, with title and what set when there is no active_plan. If known_memories has dietary restrictions or allergies (e.g. peanut allergy, vegan), explicitly acknowledge it in the question (e.g. "Who's in for dinner? (keeping it peanut-free)" or "Who's in for vegan-friendly dinner?").
+When someone asks for an expense spreadsheet, excel sheet, or breakdown of bills (e.g. "show the spreadsheet", "export bills", "send excel sheet", "generate spreadsheet"), choose export_spreadsheet.
+When someone asks to remind or nudge people about bills, owes, or payments (e.g. "remind everyone who owes", "nudge people to pay", "send payment reminders"), choose nudge_debtors.
+When someone asks for a calendar invite, calendar event, or event file (e.g. "send calendar invite", "create calendar event", "send invite", "/invite", "/calendar"), choose export_invite.
 Detect a new bill only in new_messages.
 Set bill.paid_by and bill.fixed_shares from [new message] only.
 Attribute each report to the sender shown in [new message].
 Never use an older report from recent_messages or new_messages as the newest sender's report.
+Extract any newly mentioned personal preferences, dietary restrictions, or schedule constraints into extracted.memories as short facts (e.g. "I'm vegan" -> ["Alex is vegan"]).
+CRITICAL MEMORY INSTRUCTION: Always check known_memories. If any participant has an allergy or dietary restriction, actively state it in poll questions and strictly avoid restricted foods/places when proposing options.
+FOOD CONFLICT & SAFETY INTERVENTION:
+If a participant suggests, insists on, or jokes about food that directly conflicts with an allergy or restriction in known_memories (e.g. insisting on peanuts when someone has a peanut allergy):
+1. ALWAYS set should_speak: true. Never dismiss allergy conflicts as banter, even if an existing poll is already open.
+2. Intervene immediately by calling ask_clarify with ONLY the question stating the reminder/alert (do NOT add options—keep numbered options only for actual polls when planning dates, places, or attendees).
+Example: ask_clarify({ question: "Heads up: someone has a peanut allergy!" })
 Few-shot examples:
 1. Banter
 Context: Alex: "lol that cat is huge"; Jess: "I know right"
-Output: {"is_planning":false,"confidence":0.99,"stage":"idea","should_speak":false,"reason":"ordinary banter","extracted":{"interested":[],"availability":{},"time_options":[],"place_options":[]}}
+Output: {"is_planning":false,"confidence":0.99,"stage":"idea","should_speak":false,"reason":"ordinary banter","extracted":{"interested":[],"availability":{},"time_options":[],"place_options":[]},"action":null}
 2. Sarcastic non-plan
 Context: Alex: "we should hang soon lol never"
-Output: {"is_planning":false,"confidence":0.9,"stage":"idea","should_speak":false,"reason":"sarcastic suggestion with no commitment","extracted":{"interested":[],"availability":{},"time_options":[],"place_options":[]}}
+Output: {"is_planning":false,"confidence":0.9,"stage":"idea","should_speak":false,"reason":"sarcastic suggestion with no commitment","extracted":{"interested":[],"availability":{},"time_options":[],"place_options":[]},"action":null}
 3. Plan suggestion
 Context: Alex: "Plan dinner"
-Output: {"is_planning":true,"confidence":0.95,"stage":"gathering","should_speak":true,"reason":"new plan suggestion that needs group input and participation","extracted":{"interested":["alex"],"availability":{},"time_options":[],"place_options":[],"activity":"dinner","title":"Dinner"}}
+Output: {"is_planning":true,"confidence":0.95,"stage":"gathering","should_speak":true,"reason":"new plan suggestion that needs group input and participation","extracted":{"interested":["alex"],"availability":{},"time_options":[],"place_options":[],"activity":"dinner","title":"Dinner"},"action":{"name":"create_poll","args":{"title":"Dinner","what":"dinner","question":"Who's in for dinner?","options":["I'm in","Can't make it"],"closes_at":"tomorrow at 9pm"}}}
 4. Stalled planning
 Context: Alex: "dinner this weekend?"; Jess: "yes"; Sam: "yes"; Linh: "what day"; Alex: "any day" (many recent messages, no proposal)
-Output: {"is_planning":true,"confidence":0.91,"stage":"gathering","should_speak":true,"reason":"the group has interest but no concrete proposal after a stalled burst","extracted":{"interested":["alex","jess","sam"],"availability":{},"time_options":[],"place_options":[],"activity":"dinner"}}
+Output: {"is_planning":true,"confidence":0.91,"stage":"gathering","should_speak":true,"reason":"the group has interest but no concrete proposal after a stalled burst","extracted":{"interested":["alex","jess","sam"],"availability":{},"time_options":[],"place_options":[],"activity":"dinner"},"action":{"name":"ask_clarify","args":{"question":"Which day works for dinner this weekend?","options":["Saturday","Sunday"]}}}
 5. Convergence
-Output: {"is_planning":true,"confidence":0.94,"stage":"ready_to_lock","should_speak":true,"reason":"time and place have converged and need a lock proposal","extracted":{"interested":["alex","jess","sam","linh"],"availability":{"alex":{"yes":["Friday 7pm"],"no":[],"maybe":[]},"jess":{"yes":["Friday 7pm"],"no":[],"maybe":[]}},"time_options":["Friday 7pm"],"place_options":["Pho Bac"],"activity":"dinner"}}`;
+Output: {"is_planning":true,"confidence":0.94,"stage":"ready_to_lock","should_speak":true,"reason":"time and place have converged and need a lock proposal","extracted":{"interested":["alex","jess","sam","linh"],"availability":{"alex":{"yes":["Friday 7pm"],"no":[],"maybe":[]},"jess":{"yes":["Friday 7pm"],"no":[],"maybe":[]}},"time_options":["Friday 7pm"],"place_options":["Pho Bac"],"activity":"dinner"},"action":{"name":"finalize_plan","args":{"location":"Pho Bac","starts_at":"Friday 7pm","going":["alex","jess"]}}}`;
 
-export const PLANNER_SYSTEM_PROMPT = `You are Mi Amigo's action planner for exactly one group chat.
-The app is the source of truth and renders every reply with fixed templates. Never write a user-facing reply.
-On your initial response, request exactly one tool call from the supplied tools. Never request multiple tools in one response.
-Use only participants, times, places, and amounts present in the context or tool results. Do not calculate money yourself.
-If no action is justified, call no_reply when that tool is available. Keep tool arguments valid JSON.
-Take exactly one action per invocation. After a successful tool result, end the turn immediately without calling any more tools, including no_reply.
-If a tool result explicitly reports a validation error, you may request ask_clarify once; otherwise stop after the action. Never use free-form text as a reply.
-When someone suggests a plan (e.g. "Plan dinner", "let's hang"), call create_poll with a poll asking who is joining (e.g. question: "Who's in for dinner?", options: ["I'm in", "Can't make it"], closes_at: "tomorrow at 9pm").
-Memory is enabled for this chat only; do not refer to facts from another chat.`;
+function toolCatalog(tools: ToolDefinition[]): string {
+  return tools
+    .map(
+      (tool) =>
+        `- ${tool.function.name}: ${tool.function.description} parameters=${JSON.stringify(tool.function.parameters)}`,
+    )
+    .join("\n");
+}
+
+/** One prompt covers classification and action choice, so each decision is a single call. */
+export function deciderSystemPrompt(tools: ToolDefinition[]): string {
+  return `${DECIDER_RULES}\nTool catalog:\n${toolCatalog(tools)}`;
+}
 
 interface AiSessionRow {
   chat_id: string;
@@ -167,11 +205,6 @@ interface AiSessionRow {
 interface AssistantLike {
   assistantId?: string;
   assistant_id?: string;
-}
-
-interface ThreadLike {
-  threadId?: string;
-  thread_id?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -259,6 +292,7 @@ export function buildAiContext(ctx: ChatContext): string {
     `last_evaluated_rowid: ${cursor ?? "none"}`,
     `bot_name: ${ctx.botName}`,
     `actor_handle: ${ctx.actor}`,
+    `explicit: ${ctx.explicit}`,
     `participants: ${jsonForPrompt(
       ctx.participants.map((participant) => ({
         handle: participant.handle,
@@ -267,6 +301,12 @@ export function buildAiContext(ctx: ChatContext): string {
     )}`,
     `active_plan: ${jsonForPrompt(ctx.plan)}`,
     `bills: ${jsonForPrompt(ctx.bills)}`,
+    ...(ctx.memories && ctx.memories.length > 0
+      ? [
+          "known_memories (remembered group preferences & rules):",
+          ...ctx.memories.map((m) => `- ${m}`),
+        ]
+      : []),
     "recent_messages (last 20, context only):",
     ...recentLines,
     "new_messages (since last evaluation):",
@@ -296,31 +336,60 @@ function ensureKnownHandle(
   }
 }
 
+function parseModelJson(content: string | null): unknown {
+  if (content === null || !content.trim()) {
+    throw new Error("Classifier returned no JSON content.");
+  }
+  const clean = content
+    .replace(/^```(?:json)?\s*/iu, "")
+    .replace(/\s*```$/iu, "")
+    .trim();
+  try {
+    return JSON.parse(clean);
+  } catch {
+    throw new Error("Classifier returned invalid JSON.");
+  }
+}
+
 /** Parse and validate model JSON, including identity validation before domain actions. */
 export function parseClassification(
   content: string | null,
   participants: ChatContext["participants"],
 ): Classification {
-  if (content === null || !content.trim()) {
-    throw new Error("Classifier returned no JSON content.");
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(content);
-  } catch {
-    throw new Error("Classifier returned invalid JSON.");
-  }
-  const parsed = classifierSchema.safeParse(value);
+  const parsed = classifierSchema.safeParse(parseModelJson(content));
   if (!parsed.success) {
     throw new Error("Classifier JSON did not match the required schema.");
   }
+  return checkIdentities(parsed.data as Classification, participants);
+}
 
+/** Parse the single-call decision: a classification plus at most one validated tool action. */
+export function parseDecision(
+  content: string | null,
+  participants: ChatContext["participants"],
+  tools: ToolDefinition[],
+): Decision {
+  const parsed = decisionSchema.safeParse(parseModelJson(content));
+  if (!parsed.success) {
+    throw new Error("Classifier JSON did not match the required schema.");
+  }
+  const { action, ...classification } = parsed.data;
+  return {
+    ...checkIdentities(classification as Classification, participants),
+    action: action ? parseAction(action.name, action.args ?? {}, tools) : null,
+  };
+}
+
+function checkIdentities(
+  data: Classification,
+  participants: ChatContext["participants"],
+): Classification {
   const known = participantHandles(participants);
-  for (const [index, handle] of parsed.data.extracted.interested.entries()) {
+  for (const [index, handle] of data.extracted.interested.entries()) {
     ensureKnownHandle(handle, known, `extracted.interested[${index}]`);
   }
   for (const [handle, availability] of Object.entries(
-    parsed.data.extracted.availability,
+    data.extracted.availability,
   )) {
     ensureKnownHandle(handle, known, "extracted.availability");
     for (const option of [
@@ -333,18 +402,18 @@ export function parseClassification(
       }
     }
   }
-  if (parsed.data.bill) {
-    if (parsed.data.bill.payer) {
-      ensureKnownHandle(parsed.data.bill.payer, known, "bill.payer");
+  if (data.bill) {
+    if (data.bill.payer) {
+      ensureKnownHandle(data.bill.payer, known, "bill.payer");
     }
-    for (const [index, handle] of parsed.data.bill.paid_by.entries()) {
+    for (const [index, handle] of data.bill.paid_by.entries()) {
       ensureKnownHandle(handle, known, `bill.paid_by[${index}]`);
     }
-    for (const handle of Object.keys(parsed.data.bill.fixed_shares)) {
+    for (const handle of Object.keys(data.bill.fixed_shares)) {
       ensureKnownHandle(handle, known, "bill.fixed_shares");
     }
   }
-  return parsed.data as Classification;
+  return data;
 }
 
 function validateToolArguments(
@@ -393,70 +462,16 @@ function validateToolArguments(
   return args;
 }
 
-function parseToolCall(call: ToolCall, tools: ToolDefinition[]): ToolIntent {
-  if (call?.type !== "function" || typeof call.id !== "string" || !call.id) {
-    throw new Error("Planner returned a malformed tool call.");
-  }
-  const functionCall = call.function;
-  if (
-    !functionCall ||
-    typeof functionCall.name !== "string" ||
-    !functionCall.name.trim()
-  ) {
-    throw new Error("Planner returned a tool call without a function name.");
-  }
-  const definition = tools.find(
-    (tool) => tool.function.name === functionCall.name,
-  );
+function parseAction(
+  name: string,
+  args: unknown,
+  tools: ToolDefinition[],
+): ToolIntent {
+  const definition = tools.find((tool) => tool.function.name === name);
   if (!definition) {
-    throw new Error(`Planner requested unsupported tool ${functionCall.name}.`);
+    throw new Error(`Planner requested unsupported tool ${name}.`);
   }
-  let args: unknown;
-  if (typeof functionCall.arguments !== "string") {
-    throw new Error("Planner returned missing tool arguments.");
-  }
-  try {
-    args = JSON.parse(functionCall.arguments);
-  } catch {
-    throw new Error("Planner returned invalid tool arguments JSON.");
-  }
-  return {
-    name: functionCall.name,
-    args: validateToolArguments(definition, args),
-  };
-}
-
-const STATE_MUTATING_TOOLS = new Set([
-  "start_plan",
-  "create_poll",
-  "finalize_plan",
-  "nudge",
-  "schedule_reminder",
-  "cancel_plan",
-  "split_bill",
-  "mark_paid",
-  "adjust_share",
-  "settle_bill",
-  "forgive_share",
-]);
-const VALIDATION_ERROR_PATTERN =
-  /\b(validation|invalid|ambiguous|unknown participant|required|missing)\b/i;
-
-function isValidationErrorResult(result: ActionResult): boolean {
-  if (!isRecord(result.data)) {
-    return false;
-  }
-  if (
-    result.data.validation_error === true ||
-    result.data.validationError === true ||
-    (result.data.ok === false && typeof result.data.error === "string")
-  ) {
-    return true;
-  }
-  return Object.values(result.data).some(
-    (value) =>
-      typeof value === "string" && VALIDATION_ERROR_PATTERN.test(value),
-  );
+  return { name, args: validateToolArguments(definition, args) };
 }
 
 function assistantIdFrom(value: AssistantLike): string {
@@ -467,12 +482,25 @@ function assistantIdFrom(value: AssistantLike): string {
   return id;
 }
 
-function threadIdFrom(value: ThreadLike): string {
-  const id = value.threadId ?? value.thread_id;
-  if (!id) {
-    throw new Error("Backboard returned no thread ID.");
-  }
-  return id;
+class CallTimeoutError extends Error {}
+
+/** Rejects when a Backboard request stalls, so one stuck call cannot block a chat forever. */
+function withTimeout<T>(
+  operation: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new CallTimeoutError(`Backboard ${label} timed out after ${ms}ms.`),
+        ),
+      ms,
+    );
+  });
+  return Promise.race([operation, timeout]).finally(() => clearTimeout(timer));
 }
 
 async function ignoreMissingRemoteResource(
@@ -492,6 +520,7 @@ export class BackboardAI {
   private readonly database: Database;
   private readonly config: AIConfig;
   private readonly log: (event: Record<string, unknown>) => void;
+  private readonly timeoutMs: number;
 
   constructor(
     db: Database,
@@ -501,6 +530,7 @@ export class BackboardAI {
     this.database = db;
     this.config = config;
     this.log = log;
+    this.timeoutMs = config.callTimeoutMs ?? CALL_TIMEOUT_MS;
     this.client = new BackboardClient({
       apiKey: config.apiKey,
       baseUrl: config.baseUrl,
@@ -521,9 +551,6 @@ export class BackboardAI {
     `);
     if (config.classifierId) {
       this.setSetting("classifier_id", config.classifierId);
-    }
-    if (config.plannerTemplateId) {
-      this.setSetting("planner_template_id", config.plannerTemplateId);
     }
   }
 
@@ -556,16 +583,6 @@ export class BackboardAI {
     return id;
   }
 
-  private requirePlannerTemplateId(): string {
-    const id =
-      this.config.plannerTemplateId?.trim() ||
-      this.getSetting("planner_template_id")?.trim();
-    if (!id) {
-      throw new Error("BACKBOARD_ASSISTANT_ID is required for planning.");
-    }
-    return id;
-  }
-
   private async llmCall<T>(
     operation: string,
     action: () => Promise<T>,
@@ -573,13 +590,16 @@ export class BackboardAI {
     const started = Date.now();
     let status = "error";
     try {
-      const result = await action();
+      const result = await withTimeout(action(), this.timeoutMs, operation);
       if (isRecord(result) && "status" in result) {
         status = String(result.status ?? "unknown");
       } else {
         status = "completed";
       }
       return result;
+    } catch (error) {
+      if (error instanceof CallTimeoutError) status = "timeout";
+      throw error;
     } finally {
       const event = {
         operation,
@@ -594,34 +614,41 @@ export class BackboardAI {
     }
   }
 
-  private async sendMessage(
-    operation: string,
-    options: Parameters<BackboardClient["sendMessage"]>[0],
-  ): Promise<ChatMessagesResponse> {
-    const response = await this.llmCall(operation, async () =>
-      asChatResponse(await this.client.sendMessage(options)),
-    );
-    requireCompleted(response);
-    return response;
-  }
-
-  private async submitToolOutputs(
-    options: Parameters<BackboardClient["submitToolOutputsSimple"]>[0],
-  ): Promise<ChatMessagesResponse> {
-    const response = await this.llmCall("planner_tool_outputs", async () =>
-      asChatResponse(await this.client.submitToolOutputsSimple(options)),
-    );
-    requireCompleted(response);
-    return response;
-  }
-
-  async classify(ctx: ChatContext): Promise<Classification> {
+  /** One stateless JSON call returns both the classification and the action to run. */
+  async decide(ctx: ChatContext, tools: ToolDefinition[]): Promise<Decision> {
     const content = buildAiContext(ctx);
-    const response = await this.llmCall("classifier", async () =>
-      asChatResponse(
+    const contentText = await this.llmCall("decider", async () => {
+      if (
+        this.config.provider === "omp" ||
+        this.config.classifierProvider === "omp"
+      ) {
+        const prompt = `${deciderSystemPrompt(tools)}\n\n${content}`;
+        const proc = Bun.spawn(
+          [
+            "omp",
+            "-p",
+            "--no-session",
+            "--no-tools",
+            "--thinking",
+            "off",
+            prompt,
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        const [stdout, stderr] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
+        const exitCode = await proc.exited;
+        if (exitCode !== 0) {
+          throw new Error(`omp -p failed (exit ${exitCode}): ${stderr}`);
+        }
+        return stdout;
+      }
+      const response = asChatResponse(
         await this.client.sendMessage({
           assistantId: this.requireClassifierId(),
-          systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
+          systemPrompt: deciderSystemPrompt(tools),
           content,
           llm_provider: this.config.classifierProvider,
           model_name: this.config.classifierModel,
@@ -629,11 +656,10 @@ export class BackboardAI {
           json_output: true,
           memory: "off",
         }),
-      ),
-    );
-    const threadId = response.threadId;
-    let classification: Classification;
-    try {
+      );
+      if (response.threadId) {
+        this.client.deleteThread(response.threadId).catch(() => undefined);
+      }
       requireCompleted(response);
       if (response.status !== "COMPLETED") {
         throw new Error(
@@ -643,19 +669,9 @@ export class BackboardAI {
       if (response.toolCalls?.length) {
         throw new Error("Classifier unexpectedly requested a tool action.");
       }
-      classification = parseClassification(response.content, ctx.participants);
-    } catch (error) {
-      if (threadId) {
-        try {
-          await this.client.deleteThread(threadId);
-        } catch {
-          // Keep the generation or validation error as the primary failure.
-        }
-      }
-      throw error;
-    }
-    if (threadId) await this.client.deleteThread(threadId);
-    return classification;
+      return response.content ?? "";
+    });
+    return parseDecision(contentText, ctx.participants, tools);
   }
 
   private getSession(chatId: string): AiSessionRow | null {
@@ -666,142 +682,7 @@ export class BackboardAI {
       .get(chatId);
   }
 
-  private async createPlannerSession(
-    chatId: string,
-    now: number,
-  ): Promise<AiSessionRow> {
-    const templateId = this.requirePlannerTemplateId();
-    let assistantId: string | undefined;
-    try {
-      const clone = await this.client.cloneAssistant(templateId, {
-        name: `Mi Amigo planner ${chatId.slice(0, 32)}`,
-        copy_documents: false,
-        copy_memories: false,
-      });
-      assistantId = assistantIdFrom(clone.assistant);
-      const thread = await this.client.createThread(assistantId);
-      const threadId = threadIdFrom(thread);
-      this.database
-        .query(
-          "INSERT INTO ai_sessions (chat_id, assistant_id, thread_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .run(chatId, assistantId, threadId, now, now);
-      return {
-        chat_id: chatId,
-        assistant_id: assistantId,
-        thread_id: threadId,
-      };
-    } catch (error) {
-      if (assistantId) {
-        await this.client.deleteAssistant(assistantId).catch(() => undefined);
-      }
-      throw error;
-    }
-  }
-
-  private async plannerSession(ctx: ChatContext): Promise<AiSessionRow> {
-    const existing = this.getSession(ctx.chatId);
-    if (existing) {
-      return existing;
-    }
-    return this.createPlannerSession(ctx.chatId, ctx.now);
-  }
-
-  async plan(
-    ctx: ChatContext,
-    classification: Classification | null,
-    tools: ToolDefinition[],
-    dispatch: (intent: ToolIntent) => Promise<ActionResult>,
-  ): Promise<void> {
-    if (tools.length === 0) {
-      throw new Error("Planner requires at least one tool definition.");
-    }
-    const session = await this.plannerSession(ctx);
-    const classificationBlock = classification
-      ? `\n[classification]\n${jsonForPrompt(classification)}`
-      : "\n[classification]\nnull (explicit request; inspect the context)";
-    let response = await this.sendMessage("planner", {
-      assistantId: session.assistant_id,
-      threadId: session.thread_id,
-      systemPrompt: PLANNER_SYSTEM_PROMPT,
-      content: `${buildAiContext(ctx)}${classificationBlock}`,
-      llm_provider: this.config.provider,
-      model_name: this.config.model,
-      stream: false,
-      memory: "Auto",
-      tools,
-    });
-
-    let hasToolResult = false;
-    let successfulMutation = false;
-    let validationError = false;
-    for (let round = 0; ; round += 1) {
-      if (response.status === "COMPLETED") {
-        if (!hasToolResult) {
-          throw new Error("Planner completed without returning a tool result.");
-        }
-        // The application deliberately ignores final free-form text only after tool use.
-        return;
-      }
-      if (response.status !== "REQUIRES_ACTION") {
-        requireCompleted(response);
-        throw new Error(
-          `Planner generation is not actionable (status: ${response.status ?? "missing"}).`,
-        );
-      }
-      if (round >= MAX_TOOL_ROUNDS) {
-        throw new Error(
-          `Planner exceeded the ${MAX_TOOL_ROUNDS}-round tool limit.`,
-        );
-      }
-      const calls = response.toolCalls;
-      if (calls?.length !== 1) {
-        throw new Error("Planner must request exactly one tool at a time.");
-      }
-      const intent = parseToolCall(calls[0], tools);
-      if (
-        hasToolResult &&
-        validationError &&
-        intent.name !== "ask_clarify" &&
-        intent.name !== "no_reply"
-      ) {
-        throw new Error(
-          "Only ask_clarify or no_reply may follow a validation-error tool result.",
-        );
-      }
-      if (hasToolResult && intent.name === "ask_clarify" && !validationError) {
-        throw new Error("ask_clarify requires a validation-error tool result.");
-      }
-      if (successfulMutation && intent.name !== "no_reply") {
-        throw new Error(
-          "After a successful state-mutating tool, planner may only call no_reply.",
-        );
-      }
-      const result = await dispatch(intent);
-      validationError = isValidationErrorResult(result);
-      if (STATE_MUTATING_TOOLS.has(intent.name) && !validationError) {
-        successfulMutation = true;
-      }
-      hasToolResult = true;
-      const output = JSON.stringify(result);
-      if (output === undefined) {
-        throw new Error("Tool dispatch returned an unserializable result.");
-      }
-      response = await this.submitToolOutputs({
-        threadId: session.thread_id,
-        toolOutputs: [
-          {
-            tool_call_id: calls[0].id,
-            output,
-          },
-        ],
-      });
-      this.database
-        .query("UPDATE ai_sessions SET updated_at = ? WHERE chat_id = ?")
-        .run(ctx.now, ctx.chatId);
-    }
-  }
-
+  /** Removes per-chat planner state left by earlier versions; a no-op otherwise. */
   async forget(chatId: string): Promise<void> {
     const session = this.getSession(chatId);
     if (!session) {
@@ -809,14 +690,27 @@ export class BackboardAI {
     }
     // A 404 is idempotent only for remote resources already absent. Other failures
     // leave the local session so a later invocation can retry the remaining steps.
+    // /forget pauses the chat until this finishes, so each step is bounded too.
     await ignoreMissingRemoteResource(
-      this.client.deleteThread(session.thread_id),
+      withTimeout(
+        this.client.deleteThread(session.thread_id),
+        this.timeoutMs,
+        "deleteThread",
+      ),
     );
     await ignoreMissingRemoteResource(
-      this.client.resetMemories(session.assistant_id),
+      withTimeout(
+        this.client.resetMemories(session.assistant_id),
+        this.timeoutMs,
+        "resetMemories",
+      ),
     );
     await ignoreMissingRemoteResource(
-      this.client.deleteAssistant(session.assistant_id),
+      withTimeout(
+        this.client.deleteAssistant(session.assistant_id),
+        this.timeoutMs,
+        "deleteAssistant",
+      ),
     );
     this.database
       .query("DELETE FROM ai_sessions WHERE chat_id = ?")
@@ -827,40 +721,23 @@ export class BackboardAI {
 export async function createAssistants(
   config: AIConfig,
   tools: ToolDefinition[],
-): Promise<{ classifierId: string; plannerId: string }> {
+): Promise<{ classifierId: string }> {
   const client = new BackboardClient({
     apiKey: config.apiKey,
     baseUrl: config.baseUrl,
     timeout: CALL_TIMEOUT_MS,
   });
   const classifier = await client.createAssistant({
-    name: "Mi Amigo classifier",
-    description: "Stateless JSON classifier for gated group-chat bursts.",
-    system_prompt: CLASSIFIER_SYSTEM_PROMPT,
+    name: "Mi Amigo decider",
+    description:
+      "Stateless JSON classifier that also picks one action per decision.",
+    system_prompt: deciderSystemPrompt(tools),
     tools: [],
   });
-  try {
-    const planner = await client.createAssistant({
-      name: "Mi Amigo planner template",
-      description:
-        "Planner template cloned into one isolated assistant per chat.",
-      system_prompt: PLANNER_SYSTEM_PROMPT,
-      tools,
-    });
-    return {
-      classifierId: assistantIdFrom(classifier),
-      plannerId: assistantIdFrom(planner),
-    };
-  } catch (error) {
-    await client
-      .deleteAssistant(assistantIdFrom(classifier))
-      .catch(() => undefined);
-    throw error;
-  }
+  return { classifierId: assistantIdFrom(classifier) };
 }
 
 export const AI_LIMITS = {
   callTimeoutMs: CALL_TIMEOUT_MS,
-  maxToolRounds: MAX_TOOL_ROUNDS,
   recentMessageLimit: RECENT_MESSAGE_LIMIT,
 } as const;

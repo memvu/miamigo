@@ -1,4 +1,5 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
+import { writeFileSync } from "node:fs";
 import { z } from "zod";
 import type {
   ActionResult,
@@ -143,7 +144,7 @@ const ReminderSchema = z.object({
 
 const ClarifySchema = z.object({
   question: z.string().trim().min(1),
-  options: z.array(z.string().trim().min(1)).min(2).max(4),
+  options: z.array(z.string().trim().min(1)).min(2).max(4).optional(),
 });
 
 function parseJsonArray(value: string | null | undefined): string[] {
@@ -498,6 +499,9 @@ export class Planning {
         return this.askClarify(args, ctx);
       case "cancel_plan":
         return this.cancelPlan(args, ctx);
+      case "export_invite":
+      case "get_calendar":
+        return this.calendarInvite(ctx);
       default:
         throw new Error(`Unsupported planning tool: ${name}`);
     }
@@ -831,6 +835,12 @@ export class Planning {
           [tag.id],
         );
         return plan.stage === "locked" && current?.key === event.key;
+      }
+      if (event.key.includes("clarify:") || event.key.startsWith("clarify:")) {
+        return true;
+      }
+      if (event.key.includes(":invite:")) {
+        return true;
       }
       return event.key === `plan:${tag.id}:kickoff`;
     }
@@ -1306,15 +1316,13 @@ export class Planning {
   ): ActionResult {
     const parsed = ClarifySchema.safeParse(args);
     if (!parsed.success) {
-      throw new Error(
-        "ask_clarify requires one question and two to four options.",
-      );
+      throw new Error("ask_clarify requires a question.");
     }
-    const options = uniqueStrings(parsed.data.options);
-    if (options.length < 2) {
-      throw new Error("ask_clarify options must be distinct.");
-    }
-    const text = `🤔 Quick q: ${parsed.data.question}\n${options.map((option, index) => `${index + 1}) ${option}`).join("  ")}`;
+    const options = parsed.data.options ? uniqueStrings(parsed.data.options) : [];
+    const text =
+      options.length >= 2
+        ? `Quick question: ${parsed.data.question}\n${options.map((option, index) => `${index + 1}) ${option}`).join("\n")}`
+        : parsed.data.question;
     const plan = this.activePlan(ctx.chatId);
     const resourceId = plan?.id ?? 0;
     const emission = this.delivery(
@@ -1356,6 +1364,36 @@ export class Planning {
       .query("DELETE FROM reminders WHERE plan_id = ? AND sent = 0")
       .run(plan.id);
     return { emissions: [], data: { cancelled: true, planId: plan.id } };
+  }
+
+  private calendarInvite(ctx: ChatContext): ActionResult {
+    const plan = this.activePlan(ctx.chatId);
+    if (!plan) {
+      return {
+        emissions: [
+          {
+            chatId: ctx.chatId,
+            text: "No active plan yet. Start one with /plan Dinner | dinner | Friday at 7pm.",
+            key: `plan:invite:none:${ctx.now}`,
+          },
+        ],
+      };
+    }
+    const icsPath = generateIcsFile(plan, ctx.now);
+    const when = plan.starts_at ? formatAbsolute(plan.starts_at, ctx.tz) : "TBD";
+    const text = `Calendar Event: ${plan.title}\nWhat: ${plan.what}\nWhere: ${plan.location ?? "TBD"}\nWhen: ${when}\n(Tap attached invite to add to Apple Calendar)`;
+    const key = `plan:${plan.id}:invite:${ctx.now}`;
+    const emission = this.delivery(
+      ctx,
+      text,
+      key,
+      { kind: "lock", id: plan.id },
+      [icsPath],
+    );
+    return {
+      emissions: emission ? [emission] : [],
+      data: { planId: plan.id, icsPath },
+    };
   }
 
   private handleCommand(
@@ -1527,11 +1565,13 @@ export class Planning {
     if (!locked) {
       return null;
     }
+    const icsPath = generateIcsFile(locked, ctx.now);
     return this.delivery(
       ctx,
       this.renderLock(locked, ctx.tz, ctx.participants),
       lockKey,
       { kind: "lock", id: plan.id },
+      [icsPath],
     );
   }
 
@@ -2283,6 +2323,7 @@ export class Planning {
     text: string,
     key: string,
     tag: DeliveryTag,
+    attachments?: string[],
   ): Emission | null {
     const existing = this.one<DeliveryRow>(
       `SELECT key, chat_id, kind, resource_id, text, sent, guid, created_at
@@ -2301,7 +2342,7 @@ export class Planning {
         )
         .run(key, ctx.chatId, tag.kind, tag.id, text, ctx.now);
     }
-    return { chatId: ctx.chatId, text, key, tag: { ...tag, key } };
+    return { chatId: ctx.chatId, text, key, tag: { ...tag, key }, attachments };
   }
 
   private authorize(ctx: ChatContext): void {
@@ -2390,6 +2431,41 @@ export class Planning {
   private all<T>(sql: string, params: SQLQueryBindings[] = []): T[] {
     return this.db.query<T, SQLQueryBindings[]>(sql).all(...params);
   }
+}
+function formatIcsTimestamp(timestamp: number): string {
+  return new Date(timestamp).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+}
+
+function generateIcsFile(plan: PlanRow, now: number): string {
+  const dtStamp = formatIcsTimestamp(now);
+  const start = plan.starts_at ?? now + 24 * 60 * 60 * 1000;
+  const dtStart = formatIcsTimestamp(start);
+  const dtEnd = formatIcsTimestamp(start + 2 * 60 * 60 * 1000);
+  const title = (plan.title || plan.what || "Group Event").replace(/[\r\n]/g, " ");
+  const location = (plan.location || "").replace(/[\r\n]/g, " ");
+  const description = `${plan.what || title} (Organized with Mi Amigo)`.replace(/[\r\n]/g, " ");
+  const ics = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Mi Amigo//EN",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    "BEGIN:VEVENT",
+    `UID:miamigo-${plan.id}-${now}@dubhacks26`,
+    `DTSTAMP:${dtStamp}`,
+    `DTSTART:${dtStart}`,
+    `DTEND:${dtEnd}`,
+    `SUMMARY:${title}`,
+    `DESCRIPTION:${description}`,
+    `LOCATION:${location}`,
+    "STATUS:CONFIRMED",
+    "END:VEVENT",
+    "END:VCALENDAR",
+  ].join("\r\n");
+
+  const path = `/tmp/miamigo-event-${plan.id}.ics`;
+  writeFileSync(path, ics, "utf8");
+  return path;
 }
 
 function parseJsonNumbers(value: string): number[] {
@@ -2523,10 +2599,10 @@ export const planningTools: ToolDefinition[] = [
     type: "function",
     function: {
       name: "ask_clarify",
-      description: "Ask one fixed-format question with two to four options.",
+      description: "Send a reminder, clarification note, or question to the group chat.",
       parameters: {
         type: "object",
-        required: ["question", "options"],
+        required: ["question"],
         properties: {
           question: { type: "string" },
           options: {
@@ -2537,6 +2613,18 @@ export const planningTools: ToolDefinition[] = [
           },
         },
         additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "export_invite",
+      description: "Generate and send an interactive Apple Calendar (.ics) event invite to the chat.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {},
       },
     },
   },

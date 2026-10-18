@@ -28,15 +28,13 @@ function replaceOrAppendEnvValue(
 
 export function writeAssistantSettings(
   content: string,
-  ids: { classifierId: string; plannerId: string },
+  ids: { classifierId: string },
 ): string {
-  let next = replaceOrAppendEnvValue(
+  return replaceOrAppendEnvValue(
     content,
     "BACKBOARD_CLASSIFIER_ID",
     ids.classifierId,
   );
-  next = replaceOrAppendEnvValue(next, "BACKBOARD_ASSISTANT_ID", ids.plannerId);
-  return next;
 }
 
 export async function createAndSaveAssistantSettings(
@@ -62,7 +60,7 @@ async function main(): Promise<void> {
   const loaded = loadConfig();
   const envPath = join(import.meta.dir, "..", ".env");
   await createAndSaveAssistantSettings(envPath, loaded.ai);
-  process.stdout.write("Created classifier and planner assistant settings.\n");
+  process.stdout.write("Created decider assistant settings.\n");
 }
 
 if (import.meta.main) {

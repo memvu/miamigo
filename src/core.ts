@@ -4,10 +4,9 @@ import type { Config } from "./config";
 import type {
   ActionResult,
   ChatContext,
-  Classification,
+  Decision,
   DeliveryTag,
   IncomingMessage,
-  ToolIntent,
 } from "./contracts";
 import type { Store } from "./db";
 import { Bursts, dayKey, passesGate, speakingPolicy } from "./passive";
@@ -22,6 +21,8 @@ const BILL_TOOLS = new Set([
   "get_balances",
   "settle_bill",
   "forgive_share",
+  "export_spreadsheet",
+  "nudge_debtors",
 ]);
 
 export class Core {
@@ -41,8 +42,12 @@ export class Core {
     readonly store: Store,
     private readonly planning: Planning,
     private readonly billing: Billing,
-    private readonly ai: Pick<BackboardAI, "classify" | "plan" | "forget">,
-    private readonly send: (chatId: string, text: string) => Promise<void>,
+    private readonly ai: Pick<BackboardAI, "decide" | "forget">,
+    private readonly send: (
+      chatId: string,
+      text: string,
+      attachments?: string[],
+    ) => Promise<void>,
     private readonly log: (event: Record<string, unknown>) => void,
     private readonly now: () => number = Date.now,
   ) {
@@ -73,6 +78,7 @@ export class Core {
       plan: this.planning.snapshot(chatId),
       bills: this.billing.snapshot(chatId),
       message,
+      memories: this.store.memories(chatId),
     };
   }
 
@@ -157,16 +163,23 @@ export class Core {
         this.explicit({ ...ctx, explicit: true });
         return;
       }
-      if (!this.bursts.pending.has(message.chatId))
-        this.bursts.receive(
-          message.chatId,
-          this.now(),
-          passesGate(
-            text,
-            this.planning.hasActive(message.chatId),
-            this.billing.hasOpen(message.chatId),
-          ),
+      const pending = this.bursts.pending.has(message.chatId);
+      const gated =
+        pending ||
+        passesGate(
+          text,
+          this.planning.hasActive(message.chatId),
+          this.billing.hasOpen(message.chatId),
         );
+      if (!pending) this.bursts.receive(message.chatId, this.now(), gated);
+      // Passive messages otherwise print nothing until the debounce ends, which reads as a hang.
+      this.log({
+        event: "passive",
+        chat: message.chatId,
+        status: gated
+          ? `deciding after ${Math.round(this.config.debounceMs / 1000)}s of quiet`
+          : "ignored: no active plan, planning word, or bill",
+      });
     } catch (error) {
       this.logError(error, "local", message.chatId);
       // Local parse/authorization failures are actionable replies, not invented model answers.
@@ -241,8 +254,13 @@ export class Core {
       case "help":
         this.reply(
           message,
-          "👋 Mi Amigo helps this group plan and split bills.\n/plan /poll /status /remind /cancel · /quiet /loud\n/split amount /paid [name] /owe /settle /forgive name · /forget\nSelected text is printed to the terminal and retained in SQLite for 7 days; terminal captures are not auto-pruned. Gated context goes to Backboard. /forget deletes this chat's saved state and AI memory, not terminal history.",
+          "👋 Mi Amigo helps this group plan and split bills.\n/plan /poll /status /remind /invite (Calendar .ics) /cancel · /quiet /loud\n/split amount /paid [name] /owe /nudge /settle /forgive name\n/sheet (Excel export) · /memories · /remember <fact> · /forget",
         );
+        return;
+      case "invite":
+      case "calendar":
+      case "event":
+        this.queue(this.planning.execute("export_invite", {}, ctx));
         return;
       case "status":
         this.queue(this.planning.execute("get_poll_status", {}, ctx));
@@ -270,6 +288,42 @@ export class Core {
           this.billing.execute("forgive_share", { person: args }, ctx),
         );
         return;
+      case "sheet":
+      case "excel":
+      case "spreadsheet":
+        this.queue(this.billing.execute("export_spreadsheet", {}, ctx));
+        return;
+      case "nudge":
+      case "remind-bill":
+        this.queue(this.billing.execute("nudge_debtors", {}, ctx));
+        return;
+      case "memories": {
+        const list = this.store.memories(ctx.chatId);
+        if (list.length === 0) {
+          this.reply(
+            message,
+            "🧠 No group memories saved yet. State preferences naturally (e.g. 'I'm vegan') or use /remember <fact>.",
+          );
+        } else {
+          this.reply(
+            message,
+            `🧠 Group memories:\n${list.map((m) => `• ${m}`).join("\n")}`,
+          );
+        }
+        return;
+      }
+      case "remember": {
+        if (!args.trim()) {
+          this.reply(
+            message,
+            "Usage: /remember <fact> (e.g. /remember Alex is vegetarian)",
+          );
+          return;
+        }
+        this.store.addMemory(ctx.chatId, args.trim(), this.now());
+        this.reply(message, `🧠 Saved memory: ${args.trim()}`);
+        return;
+      }
       case "split": {
         const amount = /^\$?(\d+(?:\.\d{1,2})?)(?:\s+(.*))?$/.exec(args);
         if (!amount) {
@@ -377,12 +431,8 @@ export class Core {
       )
         return;
       try {
-        await this.act(
-          this.context(ctx.chatId, ctx.actor, true, ctx.message),
-          null,
-          false,
-          "",
-        );
+        const current = this.context(ctx.chatId, ctx.actor, true, ctx.message);
+        this.act(current, await this.ai.decide(current, tools), false, "");
       } catch (error) {
         this.logError(error, "planner", ctx.chatId);
         if (
@@ -398,112 +448,125 @@ export class Core {
     });
   }
 
-  private async act(
+  /** Runs the decision's single action locally; returns whether proactive output was queued. */
+  private act(
     ctx: ChatContext,
-    decision: Classification | null,
+    decision: Decision,
     proactive: boolean,
     stageKey: string,
-  ): Promise<boolean> {
+  ): boolean {
     const epoch = this.epochs.get(ctx.chatId) ?? 0;
     const lastRow = ctx.recent.at(-1)?.rowid;
-    let acted = false;
-    let queued = false;
-    await this.ai.plan(ctx, decision, tools, async (intent: ToolIntent) => {
+    let intent = decision.action;
+    if (!intent || intent.name === "no_reply") return false;
+    if (
+      this.stopped ||
+      this.forgetting.has(ctx.chatId) ||
+      epoch !== (this.epochs.get(ctx.chatId) ?? 0)
+    )
+      throw new Error("The chat changed while the model was working.");
+    if (proactive && this.store.recent(ctx.chatId).at(-1)?.rowid !== lastRow)
+      throw new Error("New messages arrived; wait for the next lull.");
+    if (!tools.some((tool) => tool.function.name === intent?.name))
+      throw new Error("The model requested an unsupported tool.");
+    if (proactive && intent.name === "split_bill") {
+      const bill = decision.bill;
       if (
-        this.stopped ||
-        this.forgetting.has(ctx.chatId) ||
-        epoch !== (this.epochs.get(ctx.chatId) ?? 0)
+        !bill?.is_shared_expense ||
+        bill.confidence < 0.8 ||
+        bill.total === null ||
+        bill.payer === null
       )
-        throw new Error("The chat changed while the model was working.");
-      if (proactive && this.store.recent(ctx.chatId).at(-1)?.rowid !== lastRow)
-        throw new Error("New messages arrived; wait for the next lull.");
-      if (intent.name === "no_reply")
-        return { emissions: [], data: { silent: true } };
-      if (acted)
-        throw new Error("Only one action is allowed per planner turn.");
-      if (!tools.some((tool) => tool.function.name === intent.name))
-        throw new Error("The model requested an unsupported tool.");
-      if (proactive && intent.name === "split_bill") {
-        const bill = decision?.bill;
-        if (
-          !bill?.is_shared_expense ||
-          bill.confidence < 0.8 ||
-          bill.total === null ||
-          bill.payer === null
-        ) {
-          return {
-            emissions: [],
-            data: {
-              error:
-                "A shared total and known payer are required before splitting.",
-            },
-          };
-        }
+        return false;
+      intent = {
+        ...intent,
+        args: {
+          total: bill.total,
+          payer: bill.payer,
+          includes_tip: bill.includes_tip,
+          split_hint: bill.split_hint,
+          fixed_shares: bill.fixed_shares,
+        },
+      };
+    }
+    const current = this.context(
+      ctx.chatId,
+      ctx.actor,
+      ctx.explicit,
+      ctx.message,
+    );
+    // Without an active plan (e.g. after /forget) a poll needs a title, so reuse the extraction.
+    if (
+      intent.name === "create_poll" &&
+      !current.plan &&
+      !intent.args.title &&
+      !intent.args.what &&
+      !intent.args.activity
+    ) {
+      const { title, activity } = decision.extracted;
+      if (title || activity)
         intent = {
           ...intent,
           args: {
-            total: bill.total,
-            payer: bill.payer,
-            includes_tip: bill.includes_tip,
-            split_hint: bill.split_hint,
-            fixed_shares: bill.fixed_shares,
+            ...intent.args,
+            title: title ?? activity,
+            what: activity ?? title,
           },
         };
-      }
-      const current = this.context(
-        ctx.chatId,
-        ctx.actor,
-        ctx.explicit,
-        ctx.message,
-      );
-      const result = BILL_TOOLS.has(intent.name)
-        ? this.billing.execute(intent.name, intent.args, current)
-        : this.planning.execute(intent.name, intent.args, current);
-      if (
-        result.data &&
-        typeof result.data === "object" &&
-        "error" in result.data
+    }
+    const result = BILL_TOOLS.has(intent.name)
+      ? this.billing.execute(intent.name, intent.args, current)
+      : this.planning.execute(intent.name, intent.args, current);
+    if (
+      result.data &&
+      typeof result.data === "object" &&
+      "error" in result.data
+    ) {
+      if (!proactive && ctx.message)
+        this.reply(ctx.message, `🤔 ${String(result.data.error)}`);
+      return false;
+    }
+    if (!proactive || !result.emissions.length) {
+      this.queue(result);
+      return false;
+    }
+    const key = `proactive:${ctx.chatId}:${lastRow}:${stageKey}`;
+    const text = result.emissions.map((emission) => emission.text).join("\n");
+    const attachments = result.emissions.flatMap((e) => e.attachments ?? []);
+    if (
+      !this.store.queue(
+        {
+          chatId: ctx.chatId,
+          text,
+          key,
+          attachments: attachments.length > 0 ? attachments : undefined,
+        },
+        this.now(),
+        true,
+        stageKey,
       )
-        return result;
-      acted = true;
-      if (proactive && result.emissions.length) {
-        const key = `proactive:${ctx.chatId}:${lastRow}:${stageKey}`;
-        const text = result.emissions
-          .map((emission) => emission.text)
-          .join("\n");
-        if (
-          this.store.queue(
-            { chatId: ctx.chatId, text, key },
-            this.now(),
-            true,
-            stageKey,
-          )
-        ) {
-          queued = true;
-          const tags = result.emissions.flatMap((emission) =>
-            emission.tag ? [{ ...emission.tag, key: emission.key }] : [],
-          );
-          this.store.db
-            .query("UPDATE outbox SET tag_json=? WHERE event_key=?")
-            .run(JSON.stringify(tags), key);
-          const day = dayKey(this.now(), ctx.tz);
-          this.store.db
-            .query(
-              "UPDATE chats SET proactive_today=CASE WHEN proactive_day=? THEN proactive_today+1 ELSE 1 END,proactive_day=?,spoke_stage=? WHERE chat_id=?",
-            )
-            .run(
-              day,
-              day,
-              decision?.bill?.is_shared_expense
-                ? this.store.chat(ctx.chatId).spoke_stage
-                : stageKey,
-              ctx.chatId,
-            );
-        }
-      } else this.queue(result);
-      return result;
-    });
-    return queued;
+    )
+      return false;
+    const tags = result.emissions.flatMap((emission) =>
+      emission.tag ? [{ ...emission.tag, key: emission.key }] : [],
+    );
+    this.store.db
+      .query("UPDATE outbox SET tag_json=? WHERE event_key=?")
+      .run(JSON.stringify(tags), key);
+    const day = dayKey(this.now(), ctx.tz);
+    this.store.db
+      .query(
+        "UPDATE chats SET proactive_today=CASE WHEN proactive_day=? THEN proactive_today+1 ELSE 1 END,proactive_day=?,spoke_stage=? WHERE chat_id=?",
+      )
+      .run(
+        day,
+        day,
+        decision.bill?.is_shared_expense
+          ? this.store.chat(ctx.chatId).spoke_stage
+          : stageKey,
+        ctx.chatId,
+      );
+    return true;
   }
 
   private evaluate(chatId: string): void {
@@ -532,10 +595,24 @@ export class Core {
       };
       let ctx = this.context(chatId, last.handle, false, message);
       try {
-        if (burst.evaluated < version) {
-          decision = await this.ai.classify(ctx);
+        // A failed early evaluation leaves no decision; retry once the lull arrives.
+        if (burst.evaluated < version || !decision) {
+          decision = await this.ai.decide(ctx, tools);
           if (this.stopped || epoch !== (this.epochs.get(chatId) ?? 0)) return;
           this.planning.merge(ctx, decision);
+          if (
+            decision.extracted.memories &&
+            decision.extracted.memories.length > 0
+          ) {
+            for (const mem of decision.extracted.memories) {
+              this.store.addMemory(chatId, mem, this.now());
+              this.log({
+                event: "memory",
+                chat: chatId,
+                fact: mem,
+              });
+            }
+          }
           const lastProactive = this.store.chat(chatId).last_proactive_at;
           const engagedHandles = new Set([
             ...decision.extracted.interested,
@@ -608,7 +685,7 @@ export class Core {
           mode: this.config.passiveMode,
         });
         if (policy.allow && this.config.passiveMode === "live") {
-          const queued = await this.act(ctx, decision, true, policy.stageKey);
+          const queued = this.act(ctx, decision, true, policy.stageKey);
           if (queued)
             this.store.db
               .query(
@@ -719,10 +796,18 @@ export class Core {
           )
           .run(row.id);
         try {
-          await this.send(row.chat_id, row.text);
+          const attachments = row.attachments_json
+            ? (JSON.parse(row.attachments_json) as string[])
+            : undefined;
+          await this.send(row.chat_id, row.text, attachments);
           this.store.sent(row, this.now());
           this.deliverTags(this.store.tags(row), undefined, this.now());
-          this.log({ event: "sent", chat: row.chat_id, text: row.text });
+          this.log({
+            event: "sent",
+            chat: row.chat_id,
+            text: row.text,
+            ...(attachments ? { attachments } : {}),
+          });
         } catch (error) {
           this.store.db
             .query("UPDATE outbox SET status='failed',failure=? WHERE id=?")

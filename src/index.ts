@@ -18,7 +18,7 @@ async function main(): Promise<void> {
       "Set ALLOWED_CHAT_IDS in .env. Use bun run list-chats to find group IDs.",
     );
   const checking = process.argv.includes("--check");
-  if (!checking && (!config.ai.classifierId || !config.ai.plannerTemplateId)) {
+  if (!checking && config.ai.provider !== "omp" && !config.ai.classifierId) {
     throw new Error(
       "Run bun run setup to create the Backboard assistants before starting Mi Amigo.",
     );
@@ -69,7 +69,7 @@ async function main(): Promise<void> {
       planning,
       billing,
       ai,
-      (chatId, text) => transport.send(chatId, text),
+      (chatId, text, attachments) => transport.send(chatId, text, attachments),
       log,
     );
     const app = core;

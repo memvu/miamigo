@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { BackboardAI } from "../src/ai";
 import { loadConfig } from "../src/config";
 import type { ChatContext } from "../src/contracts";
+import { tools } from "../src/tools";
 
 const participants = [
   { handle: "alex", name: "Alex" },
@@ -186,13 +187,17 @@ async function main(): Promise<void> {
   try {
     for (const [index, fixture] of fixtures.entries()) {
       try {
-        const classification = await ai.classify(contextFor(fixture, index));
+        const classification = await ai.decide(
+          contextFor(fixture, index),
+          tools,
+        );
         outcomes.push({
           name: fixture.name,
           expectedSpeak: fixture.expectedSpeak,
           shouldSpeak: classification.should_speak,
           confidence: classification.confidence,
           stage: classification.stage,
+          action: classification.action?.name ?? null,
           falseSpeak: !fixture.expectedSpeak && classification.should_speak,
           falseSilent: fixture.expectedSpeak && !classification.should_speak,
         });

@@ -57,10 +57,7 @@ test("new native messages reach terminal logging and local replies exactly once"
     new Planning(store.db),
     new Billing(store.db),
     {
-      classify: async () => {
-        throw new Error("Local /help must not call AI");
-      },
-      plan: async () => {
+      decide: async () => {
         throw new Error("Local /help must not call AI");
       },
       forget: async () => {},

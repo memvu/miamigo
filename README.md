@@ -15,7 +15,7 @@ bun start
 
 Set `BACKBOARD_API_KEY`, `BACKBOARD_LLM_PROVIDER`, `BACKBOARD_MODEL`, and `ALLOWED_CHAT_IDS` in `.env` before setup.
 Copy complete group IDs from `list-chats`; separate multiple IDs with commas.
-`setup` creates the classifier and planner template and saves their IDs without printing your API key.
+`setup` creates the decider assistant and saves its ID without printing your API key.
 Run setup once, not before every start.
 See `.env.example` for optional settings.
 The old `IMESSAGE_CHAT_IDS` setting is replaced by `ALLOWED_CHAT_IDS`.
@@ -68,7 +68,7 @@ Local commands and votes continue working during an API outage.
 There is no automatic model fallback.
 
 SQLite state lives in `.data/miamigo.db` by default.
-Each chat has its own planner assistant/thread and isolated Backboard memory.
+Each decision is one stateless Backboard call (memory off) that both classifies the chat and picks the action; plan and bill state come from SQLite.
 Raw buffered messages and classifier logs are pruned after seven days.
 Terminal history and redirected stdout are not auto-pruned: they contain conversation text and must be handled as private data.
 `/forget` deletes that chat's local state and remote AI memory, but cannot erase terminal captures.

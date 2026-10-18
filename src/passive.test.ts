@@ -73,7 +73,7 @@ describe("passive cost and interruption boundaries", () => {
     expect(speakingPolicy({ ...base, lastMessageAt: now - 100 }).reason).toBe(
       "mid-burst",
     );
-    bursts.evaluated("group", 8, decision);
+    bursts.evaluated("group", 8, { ...decision, action: null });
     expect(bursts.due(now + 701, 45_000, 8)).toEqual([]);
     expect(bursts.due(now + 45_700, 45_000, 8)).toEqual(["group"]);
   });
@@ -81,7 +81,7 @@ describe("passive cost and interruption boundaries", () => {
     const bursts = new Bursts();
     bursts.receive("group", now, true);
     bursts.receive("group", now + 100, false);
-    bursts.evaluated("group", 1, decision);
+    bursts.evaluated("group", 1, { ...decision, action: null });
     expect(bursts.pending.get("group")?.version).toBe(2);
     expect(bursts.pending.get("group")?.evaluated).toBe(1);
   });
@@ -97,30 +97,14 @@ describe("proactive safeguards", () => {
       speakingPolicy({ ...base, plan: { ...plan, stage: "locked" } }).allow,
     ).toBe(false);
   });
-  test("enforces confidence, value, stage, daily, quiet and ignored-message boundaries", () => {
+  test("enforces confidence, quiet, and unanswered-message boundaries", () => {
     expect(
       speakingPolicy({ ...base, decision: { ...decision, confidence: 0.69 } })
         .allow,
     ).toBe(false);
     expect(
-      speakingPolicy({
-        ...base,
-        decision: { ...decision, reason: "planning detected" },
-      }).allow,
-    ).toBe(false);
-    expect(
-      speakingPolicy({ ...base, chat: { ...chat, spoke_stage: "1:gathering" } })
+      speakingPolicy({ ...base, decision: { ...decision, should_speak: false } })
         .allow,
-    ).toBe(false);
-    expect(
-      speakingPolicy({
-        ...base,
-        chat: {
-          ...chat,
-          proactive_day: dayKey(now, chat.tz),
-          proactive_today: 4,
-        },
-      }).allow,
     ).toBe(false);
     expect(
       speakingPolicy({ ...base, chat: { ...chat, quiet_until: now + 1 } })
@@ -130,12 +114,6 @@ describe("proactive safeguards", () => {
       speakingPolicy({ ...base, chat: { ...chat, unanswered_count: 2 } })
         .reason,
     ).toBe("unanswered-backoff");
-    expect(
-      speakingPolicy({
-        ...base,
-        chat: { ...chat, proactive_day: "2026-10-17", proactive_today: 4 },
-      }).allow,
-    ).toBe(true);
   });
   test("bill confidence bypasses the stage budget but not quiet, lull, or daily limits", () => {
     const bill = {

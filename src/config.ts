@@ -41,13 +41,15 @@ export function loadConfig(
   const model = required("BACKBOARD_MODEL");
   return {
     ai: {
-      apiKey: required("BACKBOARD_API_KEY"),
+      apiKey:
+        provider === "omp"
+          ? env.BACKBOARD_API_KEY?.trim() || "omp-local"
+          : required("BACKBOARD_API_KEY"),
       provider,
       model,
       classifierProvider: env.BACKBOARD_CLASSIFIER_PROVIDER?.trim() || provider,
       classifierModel: env.BACKBOARD_CLASSIFIER_MODEL?.trim() || model,
       classifierId: env.BACKBOARD_CLASSIFIER_ID?.trim() || undefined,
-      plannerTemplateId: env.BACKBOARD_ASSISTANT_ID?.trim() || undefined,
       botName,
     },
     allowedChats: new Set(
@@ -66,6 +68,6 @@ export function loadConfig(
       env.MESSAGES_DATABASE_PATH ||
       resolve(homedir(), "Library/Messages/chat.db"),
     contactsPath: resolve(root, env.CONTACTS_PATH || "contacts.json"),
-    allowDMs: env.ALLOW_DMS === "true",
+    allowDMs: env.ALLOW_DMS !== "false",
   };
 }

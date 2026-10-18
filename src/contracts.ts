@@ -81,6 +81,7 @@ export interface Classification {
     location?: string;
     starts_at?: string;
     objection?: boolean;
+    memories?: string[];
   };
   bill?: {
     is_shared_expense: boolean;
@@ -92,6 +93,11 @@ export interface Classification {
     paid_by: string[];
     fixed_shares: Record<string, number>;
   };
+}
+
+/** One model decision: the classification plus the single action to run locally. */
+export interface Decision extends Classification {
+  action: ToolIntent | null;
 }
 
 export interface ChatContext {
@@ -107,6 +113,7 @@ export interface ChatContext {
   plan: PlanSnapshot | null;
   bills: unknown;
   message?: IncomingMessage;
+  memories?: string[];
 }
 
 export interface DeliveryTag {
@@ -120,6 +127,7 @@ export interface Emission {
   text: string;
   key: string;
   tag?: DeliveryTag;
+  attachments?: string[];
 }
 
 export interface ActionResult {
@@ -148,7 +156,7 @@ export interface AIConfig {
   classifierProvider: string;
   classifierModel: string;
   classifierId?: string;
-  plannerTemplateId?: string;
+  callTimeoutMs?: number;
   botName: string;
   baseUrl?: string;
 }

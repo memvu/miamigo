@@ -1,0 +1,750 @@
+.page {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100svh;
+  background:
+    radial-gradient(ellipse 48% 42% at 14% 12%, rgba(244, 196, 204, 0.26), transparent 62%),
+    radial-gradient(ellipse 48% 42% at 86% 12%, rgba(244, 196, 204, 0.26), transparent 62%),
+    radial-gradient(ellipse 70% 50% at 50% 0%, rgba(255, 255, 255, 0.65), transparent 55%),
+    var(--paper);
+  overflow-x: hidden;
+}
+
+.page__grain {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.04;
+  z-index: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.hero {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 0 1.25rem;
+  overflow: hidden;
+}
+
+.hero__copy {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: min(100%, 36rem);
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+  /* solid paper behind type so floaters never read through the words */
+  background: radial-gradient(
+    ellipse 72% 68% at 50% 50%,
+    var(--paper) 0%,
+    var(--paper) 52%,
+    transparent 74%
+  );
+}
+
+.hero__brand {
+  font-family: var(--font-brand);
+  font-weight: 400;
+  font-style: normal;
+  font-size: clamp(3.4rem, 12vw, 7.1rem);
+  letter-spacing: 0;
+  line-height: 0.98;
+  color: var(--ink);
+  margin: 0 0 0.25rem;
+  text-align: center;
+  width: 100%;
+}
+
+.hero__slogan {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-style: italic;
+  font-size: clamp(1.15rem, 2.8vw, 1.65rem);
+  color: var(--ink-soft);
+  letter-spacing: -0.01em;
+  max-width: 22ch;
+  line-height: 1.35;
+  margin: 0 auto;
+  text-align: center;
+  text-wrap: balance;
+}
+
+.hero__blush {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 38% 42% at 16% 22%, rgba(246, 205, 210, 0.3), transparent 70%),
+    radial-gradient(ellipse 38% 42% at 84% 22%, rgba(246, 205, 210, 0.3), transparent 70%);
+  animation: blush-breathe 8s ease-in-out infinite alternate;
+  transform-origin: 50% 40%;
+}
+
+@keyframes blush-breathe {
+  from {
+    opacity: 0.72;
+    transform: scale(1);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1.03);
+  }
+}
+
+.sakura-field {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.sakura {
+  position: absolute;
+  top: 0;
+  width: var(--sakura-size, 18px);
+  height: var(--sakura-size, 18px);
+  will-change: transform, opacity, filter;
+}
+
+.sakura--petal {
+  height: calc(var(--sakura-size, 18px) * 1.35);
+}
+
+.sakura__svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 1px 1px rgba(120, 60, 70, 0.12));
+}
+
+.sakura__svg--t1 {
+  fill: #f0b8c0;
+}
+
+.sakura__svg--t2 {
+  fill: #e89aa6;
+}
+
+.sakura__svg--t3 {
+  fill: #f6cdd2;
+}
+
+.sakura__center {
+  fill: #f3e6b8;
+}
+
+@media (max-width: 720px) {
+  .sakura:nth-child(n + 12) {
+    display: none;
+  }
+}
+
+.float-field {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  /* punch a hole in the middle so chips never sit on the title */
+  -webkit-mask-image: radial-gradient(
+    ellipse 46% 38% at 50% 50%,
+    transparent 0%,
+    transparent 55%,
+    #000 78%
+  );
+  mask-image: radial-gradient(
+    ellipse 46% 38% at 50% 50%,
+    transparent 0%,
+    transparent 55%,
+    #000 78%
+  );
+}
+
+.float-chip {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.12rem;
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(0.78rem, 1.55vw, 0.95rem);
+  letter-spacing: -0.01em;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  padding: 0.5rem 0.85rem;
+  border-radius: 1.1rem;
+  background: rgba(255, 252, 249, 0.55);
+  border: 1px solid rgba(90, 70, 65, 0.07);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 6px 18px rgba(90, 60, 55, 0.03);
+  opacity: 0;
+  will-change: transform, opacity;
+  transform: rotate(var(--rot, 0deg));
+}
+
+.float-chip__from {
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: rgba(122, 117, 108, 0.75);
+}
+
+.float-chip__text {
+  line-height: 1.2;
+}
+
+/* trip = light note */
+.float-chip--trip {
+  border-radius: 0.35rem;
+  background: rgba(255, 253, 250, 0.58);
+  border: 1px dashed rgba(90, 70, 65, 0.14);
+  box-shadow: none;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.float-chip--trip .float-chip__text {
+  border-bottom: 1px solid rgba(15, 92, 76, 0.2);
+  padding-bottom: 0.08rem;
+}
+
+/* msg = quiet bubble */
+.float-chip--msg {
+  border-radius: 1.1rem 1.1rem 1.1rem 0.3rem;
+  background: rgba(245, 241, 235, 0.58);
+  border-color: transparent;
+}
+
+/* money = faintest sakura wash */
+.float-chip--money {
+  border-radius: 1.1rem 1.1rem 1.1rem 0.3rem;
+  background: rgba(248, 236, 238, 0.58);
+  border-color: rgba(220, 180, 185, 0.18);
+}
+
+.float-chip--money .float-chip__from {
+  color: rgba(160, 120, 125, 0.65);
+}
+
+/* ping = faintest sage wash */
+.float-chip--ping {
+  border-radius: 1.1rem 1.1rem 1.1rem 0.3rem;
+  background: rgba(236, 242, 239, 0.58);
+  border-color: rgba(15, 92, 76, 0.1);
+}
+
+.float-chip--ping .float-chip__from {
+  color: rgba(15, 92, 76, 0.45);
+}
+
+/* ghost = almost gone */
+.float-chip--ghost {
+  background: rgba(243, 241, 235, 0.32);
+  border: 1px dashed rgba(90, 70, 65, 0.1);
+  color: var(--mute);
+  box-shadow: none;
+}
+
+.float-chip--ghost .float-chip__text {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-decoration-color: rgba(122, 117, 108, 0.45);
+  opacity: 0.65;
+}
+
+.float-chip--d1 {
+  z-index: 2;
+  scale: 1.04;
+  box-shadow: 0 10px 24px rgba(90, 60, 55, 0.045);
+}
+
+.float-chip--d2 {
+  z-index: 1;
+}
+
+.float-chip--d3 {
+  z-index: 0;
+  scale: 0.94;
+  opacity: 0.72;
+}
+
+@media (max-width: 720px) {
+  .float-chip:nth-child(n + 10) {
+    display: none;
+  }
+}
+
+.story {
+  position: relative;
+  z-index: 1;
+  border-top: 1px solid var(--line);
+  background: var(--paper-deep);
+}
+
+.story__block {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: clamp(3.25rem, 8vw, 5.5rem) 1.25rem;
+}
+
+.story__block + .story__block {
+  border-top: 1px solid var(--line);
+}
+
+.story__block--chaos {
+  max-width: 880px;
+}
+
+.reveal {
+  opacity: 0;
+  transform: translateY(22px);
+  transition:
+    opacity 0.7s ease,
+    transform 0.7s ease;
+}
+
+.reveal.is-in {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.story__eyebrow {
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  color: var(--accent);
+  margin-bottom: 1rem;
+}
+
+.story__title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(1.85rem, 4.2vw, 2.65rem);
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  margin-bottom: 0.9rem;
+  max-width: 18ch;
+}
+
+.story__title--sm {
+  font-size: clamp(1.55rem, 3.4vw, 2.1rem);
+  max-width: 22ch;
+}
+
+.story__lead {
+  font-size: 1.15rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  max-width: 38ch;
+}
+
+.story__lead--tight {
+  margin-bottom: 1.25rem;
+  max-width: 40ch;
+}
+
+.story__punch {
+  margin-top: 1.5rem;
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 1.2rem;
+  color: var(--ink-soft);
+}
+
+.imessage {
+  max-width: 400px;
+  margin-top: 0.75rem;
+  border-radius: 1.5rem;
+  background: #f7f4ef;
+  border: 1px solid rgba(90, 70, 65, 0.12);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.7) inset,
+    0 22px 48px rgba(90, 60, 55, 0.08);
+  overflow: hidden;
+}
+
+.imessage__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 252, 248, 0.85);
+}
+
+.imessage__people {
+  display: flex;
+}
+
+.imessage__people span {
+  width: 1.55rem;
+  height: 1.55rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 0.62rem;
+  font-weight: 700;
+  color: #fff;
+  margin-left: -0.35rem;
+  border: 2px solid #f7f4ef;
+}
+
+.imessage__people span:first-child {
+  margin-left: 0;
+  background: #6b8f7e;
+}
+
+.imessage__people span:nth-child(2) {
+  background: #8a7a68;
+}
+
+.imessage__people span:nth-child(3) {
+  background: #7a6b8a;
+}
+
+.imessage__people span:nth-child(4) {
+  background: #8a6b6b;
+}
+
+.imessage__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  text-align: left;
+}
+
+.imessage__title {
+  font-family: var(--font-display);
+  font-size: 0.88rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.imessage__sub {
+  font-size: 0.68rem;
+  color: var(--mute);
+}
+
+.imessage__thread {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.2rem;
+  padding: 0.75rem 0.75rem 1.1rem;
+  background: #fff;
+}
+
+.imessage__stamp {
+  align-self: center;
+  margin: 0.65rem 0 0.4rem;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: #8e8e93;
+  letter-spacing: -0.01em;
+}
+
+.bubble {
+  max-width: 78%;
+  padding: 0.45rem 0.7rem 0.5rem;
+  border-radius: 1.15rem;
+  background: #e9e9eb;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  color: #000;
+  text-align: left;
+  align-self: flex-start;
+}
+
+.bubble + .bubble--them {
+  margin-top: 0.12rem;
+}
+
+.bubble__from {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: #8e8e93;
+  margin-bottom: 0.1rem;
+  margin-left: 0.15rem;
+}
+
+.bubble--amigo {
+  align-self: flex-start;
+  background: #e9e9eb;
+  color: #000;
+}
+
+.bubble--amigo .bubble__from {
+  color: #0a7cff;
+}
+
+.poll {
+  align-self: flex-start;
+  width: min(100%, 260px);
+  margin: 0.15rem 0 0.2rem 0.1rem;
+  text-align: left;
+}
+
+.poll__label {
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: #8e8e93;
+  margin: 0 0 0.3rem 0.2rem;
+}
+
+.poll__choice {
+  position: relative;
+  margin-bottom: 0.3rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #e9e9eb;
+  min-height: 2.4rem;
+}
+
+.poll__choice--win {
+  min-height: 2.85rem;
+}
+
+.poll__choice--lose {
+  min-height: 2.05rem;
+}
+
+.poll__bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: #c7c7cc;
+  border-radius: 999px;
+}
+
+.poll__choice--win .poll__bar {
+  background: #aeaeb2;
+}
+
+.poll__row {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  min-height: inherit;
+}
+
+.poll__text {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #000;
+  letter-spacing: -0.01em;
+}
+
+.poll__choice--lose .poll__text {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: #3a3a3c;
+}
+
+.poll__voters {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.poll__face {
+  width: 1.3rem;
+  height: 1.3rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 0.52rem;
+  font-weight: 700;
+  color: #fff;
+  margin-left: -0.28rem;
+  border: 1.5px solid #fff;
+}
+
+.poll__face:first-child {
+  margin-left: 0;
+}
+
+.poll__face--1 {
+  background: #34c759;
+}
+
+.poll__face--2 {
+  background: #af52de;
+}
+
+.poll__face--3 {
+  background: #ff9500;
+}
+
+.poll__face--4 {
+  background: #ff2d55;
+}
+
+.chaos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.5rem;
+  margin-top: 1.25rem;
+}
+
+.chaos__chip {
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.4rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(255, 252, 248, 0.55);
+  border: 1px solid rgba(90, 70, 65, 0.08);
+  color: var(--mute);
+}
+
+.chaos__chip:nth-child(3n) {
+  text-decoration: line-through;
+  opacity: 0.65;
+}
+
+.compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 1.35rem;
+}
+
+@media (max-width: 640px) {
+  .compare {
+    grid-template-columns: 1fr;
+  }
+}
+
+.compare__col {
+  padding: 1.1rem 1.15rem;
+  border-radius: 1rem;
+  text-align: left;
+  background: rgba(255, 252, 248, 0.45);
+  border: 1px solid rgba(90, 70, 65, 0.08);
+}
+
+.compare__col--good {
+  background: rgba(220, 232, 226, 0.35);
+  border-color: rgba(15, 92, 76, 0.12);
+}
+
+.compare__label {
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+  color: var(--mute);
+  margin-bottom: 0.75rem;
+}
+
+.compare__col--good .compare__label {
+  color: var(--accent);
+}
+
+.compare__thread {
+  display: grid;
+  gap: 0.65rem;
+  font-size: 0.95rem;
+  line-height: 1.4;
+  color: var(--ink-soft);
+}
+
+.compare__thread strong {
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--mute);
+  margin-right: 0.35rem;
+}
+
+.compare__fade {
+  opacity: 0.55;
+  font-style: italic;
+}
+
+.compare__win {
+  color: var(--accent);
+  font-family: var(--font-serif);
+  font-style: italic;
+}
+
+.steps {
+  list-style: none;
+  display: grid;
+  gap: 1.35rem;
+  margin-top: 1.5rem;
+}
+
+.steps li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.9rem;
+  text-align: left;
+}
+
+.steps__n {
+  font-family: var(--font-brand);
+  font-size: 1.6rem;
+  line-height: 1;
+  color: var(--accent);
+  padding-top: 0.15rem;
+}
+
+.steps h3 {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.25rem;
+}
+
+.steps p {
+  color: var(--ink-soft);
+  font-size: 0.98rem;
+  line-height: 1.45;
+  max-width: 36ch;
+}
+
+.footer {
+  position: relative;
+  z-index: 1;
+  border-top: 1px solid var(--line);
+  padding: 1.5rem 1.25rem 1.75rem;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--mute);
+  background: var(--paper);
+}
+
+.footer strong {
+  font-family: var(--font-display);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.footer__soft {
+  margin-top: 0.35rem;
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 0.9rem;
+  opacity: 0.85;
+}

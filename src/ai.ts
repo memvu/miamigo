@@ -145,7 +145,7 @@ Choose action from the tool catalog below. The app is the source of truth and re
 Use only participants, times, places, and amounts present in the context. Do not calculate money yourself.
 Set action to null when no action is justified. Choose at most one action and keep its args valid for that tool's parameters.
 When explicit is true, someone addressed the bot directly: choose the action that answers their request even if should_speak is false.
-When someone suggests a plan (e.g. "Plan dinner", "let's hang"), choose create_poll asking who is joining (e.g. question: "Who's in for dinner?", options: ["I'm in", "Can't make it"], closes_at: "tomorrow at 9pm").
+When someone suggests a plan (e.g. "Plan dinner", "let's hang"), choose create_poll asking who is joining, with title and what set when there is no active_plan (e.g. title: "Dinner", what: "dinner", question: "Who's in for dinner?", options: ["I'm in", "Can't make it"], closes_at: "tomorrow at 9pm").
 Detect a new bill only in new_messages.
 Set bill.paid_by and bill.fixed_shares from [new message] only.
 Attribute each report to the sender shown in [new message].
@@ -159,7 +159,7 @@ Context: Alex: "we should hang soon lol never"
 Output: {"is_planning":false,"confidence":0.9,"stage":"idea","should_speak":false,"reason":"sarcastic suggestion with no commitment","extracted":{"interested":[],"availability":{},"time_options":[],"place_options":[]},"action":null}
 3. Plan suggestion
 Context: Alex: "Plan dinner"
-Output: {"is_planning":true,"confidence":0.95,"stage":"gathering","should_speak":true,"reason":"new plan suggestion that needs group input and participation","extracted":{"interested":["alex"],"availability":{},"time_options":[],"place_options":[],"activity":"dinner","title":"Dinner"},"action":{"name":"create_poll","args":{"question":"Who's in for dinner?","options":["I'm in","Can't make it"],"closes_at":"tomorrow at 9pm"}}}
+Output: {"is_planning":true,"confidence":0.95,"stage":"gathering","should_speak":true,"reason":"new plan suggestion that needs group input and participation","extracted":{"interested":["alex"],"availability":{},"time_options":[],"place_options":[],"activity":"dinner","title":"Dinner"},"action":{"name":"create_poll","args":{"title":"Dinner","what":"dinner","question":"Who's in for dinner?","options":["I'm in","Can't make it"],"closes_at":"tomorrow at 9pm"}}}
 4. Stalled planning
 Context: Alex: "dinner this weekend?"; Jess: "yes"; Sam: "yes"; Linh: "what day"; Alex: "any day" (many recent messages, no proposal)
 Output: {"is_planning":true,"confidence":0.91,"stage":"gathering","should_speak":true,"reason":"the group has interest but no concrete proposal after a stalled burst","extracted":{"interested":["alex","jess","sam"],"availability":{},"time_options":[],"place_options":[],"activity":"dinner"},"action":{"name":"ask_clarify","args":{"question":"Which day works for dinner this weekend?","options":["Saturday","Sunday"]}}}

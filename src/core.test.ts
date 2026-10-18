@@ -197,6 +197,50 @@ describe("native event pipeline boundaries", () => {
     }
   });
 
+  test("an explicit poll after /forget starts a plan from the extracted activity", async () => {
+    const f = fixture({
+      decide: async () => ({
+        ...silent,
+        is_planning: true,
+        stage: "gathering",
+        should_speak: true,
+        reason: "new plan suggestion",
+        extracted: {
+          interested: ["alex"],
+          availability: {},
+          time_options: [],
+          place_options: [],
+          activity: "dinner",
+        },
+        action: {
+          name: "create_poll",
+          args: {
+            question: "Who's in?",
+            options: ["I'm in", "Can't make it"],
+            closes_at: "tomorrow at 9pm",
+          },
+        },
+      }),
+    });
+    try {
+      f.receive("/forget");
+      await f.core.idle();
+      f.receive("@amigo plan dinner");
+      await f.core.idle();
+      await f.advance(6000);
+      expect(f.planning.snapshot("group")?.what).toBe("dinner");
+      expect(f.planning.snapshot("group")?.openPoll?.question).toBe(
+        "Who's in?",
+      );
+      expect(f.sent.some((row) => row.text.includes("Brain freeze"))).toBe(
+        false,
+      );
+    } finally {
+      await f.core.stop();
+      f.store.close();
+    }
+  });
+
   test("passive API failures stay silent; explicit failures use the local error template", async () => {
     const f = fixture({
       decide: async () => {

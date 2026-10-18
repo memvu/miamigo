@@ -440,6 +440,25 @@ export class Core {
       ctx.explicit,
       ctx.message,
     );
+    // Without an active plan (e.g. after /forget) a poll needs a title, so reuse the extraction.
+    if (
+      intent.name === "create_poll" &&
+      !current.plan &&
+      !intent.args.title &&
+      !intent.args.what &&
+      !intent.args.activity
+    ) {
+      const { title, activity } = decision.extracted;
+      if (title || activity)
+        intent = {
+          ...intent,
+          args: {
+            ...intent.args,
+            title: title ?? activity,
+            what: activity ?? title,
+          },
+        };
+    }
     const result = BILL_TOOLS.has(intent.name)
       ? this.billing.execute(intent.name, intent.args, current)
       : this.planning.execute(intent.name, intent.args, current);

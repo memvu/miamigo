@@ -1,0 +1,55 @@
+:root {
+  --paper: #f3f1eb;
+  --paper-deep: #ebe7de;
+  --ink: #1a1a1a;
+  --ink-soft: #3d3d3d;
+  --mute: #7a756c;
+  --line: rgba(26, 26, 26, 0.1);
+  --chip: rgba(255, 252, 248, 0.62);
+  --chip-border: rgba(90, 70, 65, 0.1);
+  --accent: #0f5c4c;
+  --font-display: "Bricolage Grotesque", system-ui, sans-serif;
+  --font-brand: "Instrument Serif", Georgia, serif;
+  --font-serif: "Newsreader", Georgia, serif;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: var(--font-serif);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  overflow-x: hidden;
+  background: var(--paper);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font: inherit;
+  border: none;
+  cursor: pointer;
+  background: none;
+  color: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}

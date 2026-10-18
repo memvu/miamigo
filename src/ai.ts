@@ -15,7 +15,8 @@ import type {
   ToolIntent,
 } from "./contracts";
 
-const CALL_TIMEOUT_MS = 15_000;
+// Enforced by withTimeout: the SDK's own timeout option is ignored by node-fetch v3.
+const CALL_TIMEOUT_MS = 30_000;
 const RECENT_MESSAGE_LIMIT = 20;
 const STAGES = [
   "idea",
@@ -456,6 +457,27 @@ function assistantIdFrom(value: AssistantLike): string {
   return id;
 }
 
+class CallTimeoutError extends Error {}
+
+/** Rejects when a Backboard request stalls, so one stuck call cannot block a chat forever. */
+function withTimeout<T>(
+  operation: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new CallTimeoutError(`Backboard ${label} timed out after ${ms}ms.`),
+        ),
+      ms,
+    );
+  });
+  return Promise.race([operation, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function ignoreMissingRemoteResource(
   operation: Promise<unknown>,
 ): Promise<void> {
@@ -473,6 +495,7 @@ export class BackboardAI {
   private readonly database: Database;
   private readonly config: AIConfig;
   private readonly log: (event: Record<string, unknown>) => void;
+  private readonly timeoutMs: number;
 
   constructor(
     db: Database,
@@ -482,6 +505,7 @@ export class BackboardAI {
     this.database = db;
     this.config = config;
     this.log = log;
+    this.timeoutMs = config.callTimeoutMs ?? CALL_TIMEOUT_MS;
     this.client = new BackboardClient({
       apiKey: config.apiKey,
       baseUrl: config.baseUrl,
@@ -541,13 +565,16 @@ export class BackboardAI {
     const started = Date.now();
     let status = "error";
     try {
-      const result = await action();
+      const result = await withTimeout(action(), this.timeoutMs, operation);
       if (isRecord(result) && "status" in result) {
         status = String(result.status ?? "unknown");
       } else {
         status = "completed";
       }
       return result;
+    } catch (error) {
+      if (error instanceof CallTimeoutError) status = "timeout";
+      throw error;
     } finally {
       const event = {
         operation,
@@ -611,14 +638,27 @@ export class BackboardAI {
     }
     // A 404 is idempotent only for remote resources already absent. Other failures
     // leave the local session so a later invocation can retry the remaining steps.
+    // /forget pauses the chat until this finishes, so each step is bounded too.
     await ignoreMissingRemoteResource(
-      this.client.deleteThread(session.thread_id),
+      withTimeout(
+        this.client.deleteThread(session.thread_id),
+        this.timeoutMs,
+        "deleteThread",
+      ),
     );
     await ignoreMissingRemoteResource(
-      this.client.resetMemories(session.assistant_id),
+      withTimeout(
+        this.client.resetMemories(session.assistant_id),
+        this.timeoutMs,
+        "resetMemories",
+      ),
     );
     await ignoreMissingRemoteResource(
-      this.client.deleteAssistant(session.assistant_id),
+      withTimeout(
+        this.client.deleteAssistant(session.assistant_id),
+        this.timeoutMs,
+        "deleteAssistant",
+      ),
     );
     this.database
       .query("DELETE FROM ai_sessions WHERE chat_id = ?")

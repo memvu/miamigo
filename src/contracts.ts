@@ -153,6 +153,7 @@ export interface AIConfig {
   classifierProvider: string;
   classifierModel: string;
   classifierId?: string;
+  callTimeoutMs?: number;
   botName: string;
   baseUrl?: string;
 }

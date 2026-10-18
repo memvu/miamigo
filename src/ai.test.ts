@@ -91,6 +91,7 @@ interface MockState {
     | "invalid"
     | "bad-args"
     | "failed"
+    | "hang"
     | "forget-partial"
     | "forget-auth";
   requests: Array<{ path: string; body: Record<string, unknown> | null }>;
@@ -200,6 +201,9 @@ function startMock(mode: MockState["mode"] = "normal"): MockState {
         request.method === "POST" &&
         url.pathname === "/api/threads/messages"
       ) {
+        if (state.mode === "hang") {
+          return await new Promise<Response>(() => {});
+        }
         if (state.mode === "failed") {
           return Response.json(
             messageResponse({
@@ -399,6 +403,25 @@ describe("Backboard single-call decision", () => {
     await expect(ai.decide(context(), testTools)).rejects.toThrow(
       "invalid argument type for options",
     );
+    database.close();
+  });
+
+  test("times out a stalled call instead of hanging the chat", async () => {
+    const mock = startMock("hang");
+    openServers.push(mock);
+    const database = new Database(":memory:");
+    const events: Record<string, unknown>[] = [];
+    const ai = new BackboardAI(
+      database,
+      { ...config(`${mock.server.url}api`), callTimeoutMs: 100 },
+      (event) => events.push(event),
+    );
+    await expect(ai.decide(context(), testTools)).rejects.toThrow(
+      "timed out after 100ms",
+    );
+    expect(events).toEqual([
+      expect.objectContaining({ operation: "decider", status: "timeout" }),
+    ]);
     database.close();
   });
 

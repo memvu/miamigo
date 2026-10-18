@@ -47,7 +47,6 @@ export function loadConfig(
       classifierProvider: env.BACKBOARD_CLASSIFIER_PROVIDER?.trim() || provider,
       classifierModel: env.BACKBOARD_CLASSIFIER_MODEL?.trim() || model,
       classifierId: env.BACKBOARD_CLASSIFIER_ID?.trim() || undefined,
-      plannerTemplateId: env.BACKBOARD_ASSISTANT_ID?.trim() || undefined,
       botName,
     },
     allowedChats: new Set(

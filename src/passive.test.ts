@@ -73,7 +73,7 @@ describe("passive cost and interruption boundaries", () => {
     expect(speakingPolicy({ ...base, lastMessageAt: now - 100 }).reason).toBe(
       "mid-burst",
     );
-    bursts.evaluated("group", 8, decision);
+    bursts.evaluated("group", 8, { ...decision, action: null });
     expect(bursts.due(now + 701, 45_000, 8)).toEqual([]);
     expect(bursts.due(now + 45_700, 45_000, 8)).toEqual(["group"]);
   });
@@ -81,7 +81,7 @@ describe("passive cost and interruption boundaries", () => {
     const bursts = new Bursts();
     bursts.receive("group", now, true);
     bursts.receive("group", now + 100, false);
-    bursts.evaluated("group", 1, decision);
+    bursts.evaluated("group", 1, { ...decision, action: null });
     expect(bursts.pending.get("group")?.version).toBe(2);
     expect(bursts.pending.get("group")?.evaluated).toBe(1);
   });

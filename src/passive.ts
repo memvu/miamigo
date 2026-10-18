@@ -1,4 +1,4 @@
-import type { Classification, PlanSnapshot } from "./contracts";
+import type { Classification, Decision, PlanSnapshot } from "./contracts";
 import type { ChatState } from "./db";
 
 const PLANNING =
@@ -121,7 +121,7 @@ export interface Burst {
   lastAt: number;
   version: number;
   evaluated: number;
-  decision: Classification | null;
+  decision: Decision | null;
 }
 
 export class Bursts {
@@ -157,7 +157,7 @@ export class Bursts {
   evaluated(
     chatId: string,
     version: number,
-    decision: Classification | null,
+    decision: Decision | null,
   ): void {
     const current = this.pending.get(chatId);
     if (current) {

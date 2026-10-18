@@ -2,12 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { BackboardAI } from "./ai";
 import { Billing } from "./bills";
 import type { Config } from "./config";
-import type { ChatContext, Classification, IncomingMessage } from "./contracts";
+import type { ChatContext, Decision, IncomingMessage } from "./contracts";
 import { Core } from "./core";
 import { Store } from "./db";
 import { Planning } from "./planning";
 
-const silent: Classification = {
+const silent: Decision = {
   is_planning: false,
   confidence: 0.95,
   stage: "idea",
@@ -19,10 +19,11 @@ const silent: Classification = {
     time_options: [],
     place_options: [],
   },
+  action: null,
 };
 
 function fixture(
-  overrides: Partial<Pick<BackboardAI, "classify" | "plan" | "forget">> = {},
+  overrides: Partial<Pick<BackboardAI, "decide" | "forget">> = {},
 ) {
   let clock = Date.UTC(2026, 9, 18, 12);
   const store = new Store(":memory:");
@@ -54,17 +55,11 @@ function fixture(
     contactsPath: "unused",
     allowDMs: false,
   };
-  let classifications = 0;
-  let plans = 0;
-  const ai: Pick<BackboardAI, "classify" | "plan" | "forget"> = {
-    classify: async (ctx) => {
-      classifications++;
-      return overrides.classify ? await overrides.classify(ctx) : silent;
-    },
-    plan: async (...args) => {
-      plans++;
-      if (overrides.plan) await overrides.plan(...args);
-      else throw new Error("503 UNAVAILABLE");
+  let decisions = 0;
+  const ai: Pick<BackboardAI, "decide" | "forget"> = {
+    decide: async (ctx, tools) => {
+      decisions++;
+      return overrides.decide ? await overrides.decide(ctx, tools) : silent;
     },
     forget: async (chatId) => {
       if (overrides.forget) await overrides.forget(chatId);
@@ -133,11 +128,8 @@ function fixture(
     receive,
     ctx,
     advance,
-    get classifications() {
-      return classifications;
-    },
-    get plans() {
-      return plans;
+    get decisions() {
+      return decisions;
     },
     get now() {
       return clock;
@@ -168,7 +160,7 @@ describe("native event pipeline boundaries", () => {
         "hello\nworld",
       ]);
       await f.advance(60_000);
-      expect(f.classifications).toBe(0);
+      expect(f.decisions).toBe(0);
       expect(f.sent).toEqual([]);
     } finally {
       await f.core.stop();
@@ -177,11 +169,11 @@ describe("native event pipeline boundaries", () => {
   });
 
   test("model work does not block incoming logs or local bill commands", async () => {
-    let resolve!: (value: Classification) => void;
-    const pending = new Promise<Classification>((done) => {
+    let resolve!: (value: Decision) => void;
+    const pending = new Promise<Decision>((done) => {
       resolve = done;
     });
-    const f = fixture({ classify: async () => await pending });
+    const f = fixture({ decide: async () => await pending });
     try {
       f.receive("anyone down for food?");
       f.now += 45_000;
@@ -207,7 +199,7 @@ describe("native event pipeline boundaries", () => {
 
   test("passive API failures stay silent; explicit failures use the local error template", async () => {
     const f = fixture({
-      classify: async () => {
+      decide: async () => {
         throw new Error("503 UNAVAILABLE");
       },
     });
@@ -254,8 +246,7 @@ describe("local workflows remain independent of Backboard", () => {
       const count = f.sent.length;
       await f.advance(3 * 86_400_000);
       expect(f.sent).toHaveLength(count);
-      expect(f.classifications).toBe(0);
-      expect(f.plans).toBe(0);
+      expect(f.decisions).toBe(0);
     } finally {
       await f.core.stop();
       f.store.close();
@@ -283,8 +274,7 @@ describe("local workflows remain independent of Backboard", () => {
         "jo",
         "sam",
       ]);
-      expect(f.classifications).toBe(0);
-      expect(f.plans).toBe(0);
+      expect(f.decisions).toBe(0);
     } finally {
       await f.core.stop();
       f.store.close();
@@ -308,7 +298,7 @@ describe("local workflows remain independent of Backboard", () => {
       await f.advance(1000);
       f.receive("/loud");
       expect(f.store.chat("group").quiet_until).toBe(0);
-      expect(f.classifications).toBe(0);
+      expect(f.decisions).toBe(0);
     } finally {
       await f.core.stop();
       f.store.close();
@@ -342,8 +332,8 @@ describe("local workflows remain independent of Backboard", () => {
 });
 
 describe("passive lifecycle integration", () => {
-  test("shadow extraction updates state without planner calls or output", async () => {
-    const decision: Classification = {
+  test("shadow extraction updates state without running the action or output", async () => {
+    const decision: Decision = {
       ...silent,
       is_planning: true,
       stage: "gathering",
@@ -355,8 +345,9 @@ describe("passive lifecycle integration", () => {
         time_options: ["Friday", "Saturday"],
         place_options: [],
       },
+      action: { name: "nudge", args: {} },
     };
-    const f = fixture({ classify: async () => decision });
+    const f = fixture({ decide: async () => decision });
     f.config.passiveMode = "shadow";
     try {
       f.receive("Friday dinner works for me", "sam");
@@ -366,7 +357,7 @@ describe("passive lifecycle integration", () => {
       expect(f.planning.snapshot("group")?.availability.sam.yes).toHaveLength(
         1,
       );
-      expect(f.plans).toBe(0);
+      expect(f.decisions).toBe(1);
       expect(f.sent).toEqual([]);
       expect(
         f.store.db.query("SELECT spoke FROM classifier_log").get(),
@@ -386,32 +377,31 @@ describe("passive lifecycle integration", () => {
     const entered = new Promise<void>((resolve) => {
       started = resolve;
     });
-    const decision: Classification = {
-      ...silent,
-      is_planning: true,
-      stage: "gathering",
-      should_speak: true,
-      reason: "Planning stalled with no time proposal",
-      extracted: {
-        interested: ["alex", "sam"],
-        availability: {},
-        time_options: [],
-        place_options: [],
-      },
-    };
     const f = fixture({
-      classify: async () => decision,
-      plan: async (ctx, _decision, _tools, dispatch) => {
+      decide: async (ctx) => {
         started();
         await gate;
-        await dispatch({
-          name: "create_poll",
-          args: {
-            question: "Which day?",
-            options: ["Friday", "Saturday"],
-            closes_at: ctx.now + 86_400_000,
+        return {
+          ...silent,
+          is_planning: true,
+          stage: "gathering",
+          should_speak: true,
+          reason: "Planning stalled with no time proposal",
+          extracted: {
+            interested: ["alex", "sam"],
+            availability: {},
+            time_options: [],
+            place_options: [],
           },
-        });
+          action: {
+            name: "create_poll",
+            args: {
+              question: "Which day?",
+              options: ["Friday", "Saturday"],
+              closes_at: ctx.now + 86_400_000,
+            },
+          },
+        };
       },
     });
     try {
@@ -435,7 +425,7 @@ describe("passive lifecycle integration", () => {
 
   test("no_reply does not charge budgets or claim a spoken classification", async () => {
     const f = fixture({
-      classify: async () => ({
+      decide: async () => ({
         ...silent,
         is_planning: true,
         stage: "gathering",
@@ -447,15 +437,13 @@ describe("passive lifecycle integration", () => {
           time_options: [],
           place_options: [],
         },
+        action: { name: "no_reply", args: {} },
       }),
-      plan: async (_ctx, _decision, _tools, dispatch) => {
-        await dispatch({ name: "no_reply", args: {} });
-      },
     });
     try {
       for (let index = 0; index < 10; index++) f.receive("dinner planning");
       await f.advance(45_000);
-      expect(f.plans).toBe(1);
+      expect(f.decisions).toBe(1);
       expect(f.store.chat("group").proactive_today).toBe(0);
       expect(
         f.store.db.query("SELECT spoke FROM classifier_log").get(),
@@ -469,7 +457,7 @@ describe("passive lifecycle integration", () => {
 
   test("two ignored proactive splits back off for one day without losing the extracted total", async () => {
     const f = fixture({
-      classify: async (ctx) => ({
+      decide: async (ctx) => ({
         ...silent,
         bill: {
           is_shared_expense: true,
@@ -481,13 +469,11 @@ describe("passive lifecycle integration", () => {
           paid_by: [],
           fixed_shares: {},
         },
-      }),
-      plan: async (_ctx, _decision, _tools, dispatch) => {
-        await dispatch({
+        action: {
           name: "split_bill",
           args: { total: 999, payer: "alex", includes_tip: "unknown" },
-        });
-      },
+        },
+      }),
     });
     try {
       f.receive("bill was $50 total");
@@ -502,13 +488,16 @@ describe("passive lifecycle integration", () => {
       expect(f.store.chat("group").unanswered_count).toBe(2);
       f.receive("another bill was $70 total");
       await f.advance(45_000);
-      expect(f.plans).toBe(2);
       expect(f.store.chat("group").quiet_until).toBe(f.now + 86_400_000);
       expect(f.store.chat("group").unanswered_count).toBe(0);
+      await f.advance(1000);
+      expect(f.sent.some((row) => row.text.includes("$70.00"))).toBe(false);
       f.now += 86_400_000;
       f.receive("another bill was $80 total");
       await f.advance(45_000);
-      expect(f.plans).toBe(3);
+      expect(
+        f.store.pending().some((row) => row.text.includes("$80.00")),
+      ).toBe(true);
     } finally {
       await f.core.stop();
       f.store.close();
@@ -568,8 +557,7 @@ describe("passive lifecycle integration", () => {
       expect(
         f.store.db.query("SELECT COUNT(*) AS count FROM reminders").get(),
       ).toEqual({ count: 1 });
-      expect(f.classifications).toBe(0);
-      expect(f.plans).toBe(0);
+      expect(f.decisions).toBe(0);
     } finally {
       await f.core.stop();
       f.store.close();

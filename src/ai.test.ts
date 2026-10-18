@@ -1,8 +1,12 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { BackboardAI, buildAiContext, parseClassification } from "./ai";
+import {
+  BackboardAI,
+  buildAiContext,
+  parseClassification,
+  parseDecision,
+} from "./ai";
 import type {
-  ActionResult,
   AIConfig,
   ChatContext,
   ToolDefinition,
@@ -84,18 +88,12 @@ interface TestServer {
 interface MockState {
   mode:
     | "normal"
-    | "parallel"
     | "invalid"
-    | "completed"
+    | "bad-args"
     | "failed"
-    | "loop"
     | "forget-partial"
     | "forget-auth";
   requests: Array<{ path: string; body: Record<string, unknown> | null }>;
-  plannerCalls: number;
-  toolOutputSubmissions: number;
-  createdAssistants: string[];
-  createdThreads: Array<{ assistantId: string; threadId: string }>;
   deletedThreads: string[];
   deletedAssistants: string[];
   threadDeleteAttempts: Map<string, number>;
@@ -103,14 +101,32 @@ interface MockState {
   server: TestServer;
 }
 
+function decisionFor(mode: MockState["mode"]): Record<string, unknown> {
+  if (mode === "invalid") {
+    return {
+      ...validClassification(),
+      action: { name: "unsupported_action", args: {} },
+    };
+  }
+  if (mode === "bad-args") {
+    return {
+      ...validClassification(),
+      action: {
+        name: "create_poll",
+        args: { question: "Which day?", options: "Friday" },
+      },
+    };
+  }
+  return {
+    ...validClassification(),
+    action: { name: "no_reply", args: {} },
+  };
+}
+
 function startMock(mode: MockState["mode"] = "normal"): MockState {
   const state = {
     mode,
     requests: [],
-    plannerCalls: 0,
-    toolOutputSubmissions: 0,
-    createdAssistants: [],
-    createdThreads: [],
     deletedThreads: [],
     deletedAssistants: [],
     threadDeleteAttempts: new Map<string, number>(),
@@ -182,65 +198,6 @@ function startMock(mode: MockState["mode"] = "normal"): MockState {
       }
       if (
         request.method === "POST" &&
-        url.pathname === "/api/assistants/template-id/clone"
-      ) {
-        const assistantId = `planner-assistant-${state.createdAssistants.length + 1}`;
-        state.createdAssistants.push(assistantId);
-        return Response.json({
-          assistant: {
-            assistant_id: assistantId,
-            name: "planner",
-            tools: [],
-            created_at: new Date().toISOString(),
-          },
-          documents_cloned: 0,
-          memories_cloned: 0,
-        });
-      }
-      if (
-        request.method === "POST" &&
-        url.pathname.startsWith("/api/assistants/") &&
-        url.pathname.endsWith("/threads")
-      ) {
-        const assistantId = url.pathname.split("/")[3];
-        const threadId = `planner-thread-${state.createdThreads.length + 1}`;
-        state.createdThreads.push({ assistantId, threadId });
-        return Response.json({
-          thread_id: threadId,
-          created_at: new Date().toISOString(),
-          messages: [],
-        });
-      }
-      if (
-        request.method === "POST" &&
-        url.pathname === "/api/threads/tool-outputs"
-      ) {
-        state.toolOutputSubmissions += 1;
-        if (state.mode === "loop") {
-          return Response.json(
-            messageResponse({
-              thread_id: body?.thread_id,
-              status: "REQUIRES_ACTION",
-              tool_calls: [
-                {
-                  id: `call-${state.toolOutputSubmissions + 1}`,
-                  type: "function",
-                  function: { name: "no_reply", arguments: "{}" },
-                },
-              ],
-            }),
-          );
-        }
-        return Response.json(
-          messageResponse({
-            thread_id: body?.thread_id,
-            content: "ignored final free text",
-            status: "COMPLETED",
-          }),
-        );
-      }
-      if (
-        request.method === "POST" &&
         url.pathname === "/api/threads/messages"
       ) {
         if (state.mode === "failed") {
@@ -252,57 +209,10 @@ function startMock(mode: MockState["mode"] = "normal"): MockState {
             }),
           );
         }
-        if (body?.assistant_id === "classifier-id") {
-          return Response.json(
-            messageResponse({
-              thread_id: "classifier-thread",
-              content: JSON.stringify(validClassification()),
-            }),
-          );
-        }
-        state.plannerCalls += 1;
-        if (state.mode === "completed") {
-          return Response.json(
-            messageResponse({
-              thread_id: body?.thread_id,
-              content: "free-form planner response without a tool",
-              status: "COMPLETED",
-            }),
-          );
-        }
-        const toolCalls =
-          state.mode === "parallel"
-            ? [
-                {
-                  id: "call-1",
-                  type: "function",
-                  function: { name: "no_reply", arguments: "{}" },
-                },
-                {
-                  id: "call-2",
-                  type: "function",
-                  function: { name: "no_reply", arguments: "{}" },
-                },
-              ]
-            : [
-                {
-                  id: "call-1",
-                  type: "function",
-                  function: {
-                    name:
-                      state.mode === "invalid"
-                        ? "unsupported_action"
-                        : "no_reply",
-                    arguments: "{}",
-                  },
-                },
-              ];
         return Response.json(
           messageResponse({
-            thread_id: body?.thread_id,
-            content: "",
-            status: "REQUIRES_ACTION",
-            tool_calls: toolCalls,
+            thread_id: "classifier-thread",
+            content: JSON.stringify(decisionFor(state.mode)),
           }),
         );
       }
@@ -320,7 +230,6 @@ function config(baseUrl: string, classifierId = "classifier-id"): AIConfig {
     classifierProvider: "model-router/v1",
     classifierModel: "classifier-model",
     classifierId,
-    plannerTemplateId: "template-id",
     botName: "amigo",
     baseUrl,
   };
@@ -334,6 +243,45 @@ const noReplyTool: ToolDefinition = {
     parameters: { type: "object", properties: {}, required: [] },
   },
 };
+
+const pollTool: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "create_poll",
+    description: "Open a poll",
+    parameters: {
+      type: "object",
+      required: ["question", "options"],
+      properties: {
+        question: { type: "string" },
+        options: { type: "array", items: { type: "string" } },
+      },
+    },
+  },
+};
+
+const testTools = [noReplyTool, pollTool];
+
+/** Seeds per-chat rows the way earlier planner versions stored them. */
+function seedLegacySessions(database: Database, chatIds: string[]): void {
+  for (const [index, chatId] of chatIds.entries()) {
+    database
+      .query(
+        "INSERT INTO ai_sessions (chat_id, assistant_id, thread_id, created_at, updated_at) VALUES (?, ?, ?, 0, 0)",
+      )
+      .run(
+        chatId,
+        `planner-assistant-${index + 1}`,
+        `planner-thread-${index + 1}`,
+      );
+  }
+}
+
+async function settle(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 50 && !condition(); attempt++) {
+    await Bun.sleep(5);
+  }
+}
 
 const openServers: MockState[] = [];
 afterEach(() => {
@@ -361,6 +309,32 @@ describe("classifier boundary", () => {
     ).toThrow("required schema");
   });
 
+  test("parses the decision action and treats a missing action as none", () => {
+    expect(
+      parseDecision(
+        JSON.stringify(validClassification()),
+        participants,
+        testTools,
+      ).action,
+    ).toBeNull();
+    const decision = parseDecision(
+      JSON.stringify({
+        ...validClassification(),
+        action: {
+          name: "create_poll",
+          args: { question: "Which day?", options: ["Friday"] },
+        },
+      }),
+      participants,
+      testTools,
+    );
+    expect(decision.stage).toBe("gathering");
+    expect(decision.action).toEqual({
+      name: "create_poll",
+      args: { question: "Which day?", options: ["Friday"] },
+    });
+  });
+
   test("builds bounded timezone-aware context", () => {
     const source = context();
     source.recent = Array.from({ length: 25 }, (_, index) => ({
@@ -374,6 +348,7 @@ describe("classifier boundary", () => {
     const rendered = buildAiContext(source);
     expect(rendered).toContain("timezone: America/Los_Angeles");
     expect(rendered).toContain("last_evaluated_rowid: 23");
+    expect(rendered).toContain("explicit: true");
     expect(rendered).toContain("new_messages (since last evaluation):");
     expect(rendered).toContain("message 24");
     expect(rendered).not.toContain("message 0");
@@ -381,178 +356,49 @@ describe("classifier boundary", () => {
   });
 });
 
-describe("Backboard state machine", () => {
-  test("uses a short-lived classifier thread and preserves request context", async () => {
+describe("Backboard single-call decision", () => {
+  test("classifies and picks an action in one stateless call", async () => {
     const mock = startMock();
     openServers.push(mock);
     const database = new Database(":memory:");
     const ai = new BackboardAI(database, config(`${mock.server.url}api`));
-    const result = await ai.classify(context());
+    const result = await ai.decide(context(), testTools);
     expect(result.stage).toBe("gathering");
-    expect(mock.deletedThreads).toEqual(["classifier-thread"]);
-    const request = mock.requests.find(
+    expect(result.action).toEqual({ name: "no_reply", args: {} });
+    const calls = mock.requests.filter(
       (entry) => entry.path === "/api/threads/messages",
     );
-    expect(request?.body?.memory).toBe("off");
-    expect(String(request?.body?.content)).toContain("recent_messages");
-    database.close();
-  });
-
-  test("isolates planner assistants and threads per chat and reuses them after restart", async () => {
-    const mock = startMock();
-    openServers.push(mock);
-    const database = new Database(":memory:");
-    const firstInstance = new BackboardAI(
-      database,
-      config(`${mock.server.url}api`),
-    );
-    const dispatches: string[] = [];
-    const dispatch = async (intent: {
-      name: string;
-    }): Promise<ActionResult> => {
-      dispatches.push(intent.name);
-      return { emissions: [] };
-    };
-    for (const chatId of ["chat-a", "chat-b"]) {
-      await firstInstance.plan(context(chatId), null, [noReplyTool], dispatch);
-    }
-
-    const restartedInstance = new BackboardAI(
-      database,
-      config(`${mock.server.url}api`),
-    );
-    for (const chatId of ["chat-a", "chat-b"]) {
-      await restartedInstance.plan(
-        context(chatId),
-        null,
-        [noReplyTool],
-        dispatch,
-      );
-    }
-
-    const plannerRequests = mock.requests.filter(
-      (entry) =>
-        entry.path === "/api/threads/messages" &&
-        entry.body?.assistant_id !== "classifier-id",
-    );
-    expect(mock.createdAssistants).toEqual([
-      "planner-assistant-1",
-      "planner-assistant-2",
-    ]);
-    expect(mock.createdThreads).toEqual([
-      { assistantId: "planner-assistant-1", threadId: "planner-thread-1" },
-      { assistantId: "planner-assistant-2", threadId: "planner-thread-2" },
-    ]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].body?.memory).toBe("off");
+    expect(String(calls[0].body?.content)).toContain("recent_messages");
+    expect(JSON.stringify(calls[0].body)).toContain("Tool catalog");
     expect(
-      plannerRequests.map((request) => request.body?.assistant_id),
-    ).toEqual([
-      "planner-assistant-1",
-      "planner-assistant-2",
-      "planner-assistant-1",
-      "planner-assistant-2",
-    ]);
-    expect(plannerRequests.map((request) => request.body?.thread_id)).toEqual([
-      "planner-thread-1",
-      "planner-thread-2",
-      "planner-thread-1",
-      "planner-thread-2",
-    ]);
-    expect(
-      plannerRequests.every((request) => request.body?.memory === "Auto"),
-    ).toBe(true);
-    expect(dispatches).toEqual([
-      "no_reply",
-      "no_reply",
-      "no_reply",
-      "no_reply",
-    ]);
-    expect(mock.toolOutputSubmissions).toBe(4);
-    expect(
-      database
-        .query(
-          "SELECT chat_id, assistant_id, thread_id FROM ai_sessions ORDER BY chat_id",
-        )
-        .all(),
-    ).toEqual([
-      {
-        chat_id: "chat-a",
-        assistant_id: "planner-assistant-1",
-        thread_id: "planner-thread-1",
-      },
-      {
-        chat_id: "chat-b",
-        assistant_id: "planner-assistant-2",
-        thread_id: "planner-thread-2",
-      },
-    ]);
+      mock.requests.some((entry) => entry.path.includes("tool-outputs")),
+    ).toBe(false);
+    await settle(() => mock.deletedThreads.length > 0);
+    expect(mock.deletedThreads).toEqual(["classifier-thread"]);
     database.close();
   });
 
-  test("rejects initial free-form completion without dispatching a tool", async () => {
-    const mock = startMock("completed");
-    openServers.push(mock);
-    const database = new Database(":memory:");
-    const ai = new BackboardAI(database, config(`${mock.server.url}api`));
-    let dispatches = 0;
-    await expect(
-      ai.plan(context(), null, [noReplyTool], async () => {
-        dispatches += 1;
-        return { emissions: [] };
-      }),
-    ).rejects.toThrow("without returning a tool result");
-    expect(dispatches).toBe(0);
-    expect(mock.toolOutputSubmissions).toBe(0);
-    database.close();
-  });
-
-  test("rejects parallel tool calls before dispatch", async () => {
-    const mock = startMock("parallel");
-    openServers.push(mock);
-    const database = new Database(":memory:");
-    const ai = new BackboardAI(database, config(`${mock.server.url}api`));
-    let dispatches = 0;
-    await expect(
-      ai.plan(context(), null, [noReplyTool], async () => {
-        dispatches += 1;
-        return { emissions: [] };
-      }),
-    ).rejects.toThrow("exactly one tool");
-    expect(dispatches).toBe(0);
-    expect(mock.toolOutputSubmissions).toBe(0);
-    database.close();
-  });
-
-  test("rejects unsupported tool calls before dispatch", async () => {
+  test("rejects an unsupported tool action", async () => {
     const mock = startMock("invalid");
     openServers.push(mock);
     const database = new Database(":memory:");
     const ai = new BackboardAI(database, config(`${mock.server.url}api`));
-    let dispatches = 0;
-    await expect(
-      ai.plan(context(), null, [noReplyTool], async () => {
-        dispatches += 1;
-        return { emissions: [] };
-      }),
-    ).rejects.toThrow("unsupported tool");
-    expect(dispatches).toBe(0);
-    expect(mock.toolOutputSubmissions).toBe(0);
+    await expect(ai.decide(context(), testTools)).rejects.toThrow(
+      "unsupported tool unsupported_action",
+    );
     database.close();
   });
 
-  test("bounds repeated no_reply tool rounds", async () => {
-    const mock = startMock("loop");
+  test("rejects tool arguments of the wrong type", async () => {
+    const mock = startMock("bad-args");
     openServers.push(mock);
     const database = new Database(":memory:");
     const ai = new BackboardAI(database, config(`${mock.server.url}api`));
-    let dispatches = 0;
-    await expect(
-      ai.plan(context(), null, [noReplyTool], async () => {
-        dispatches += 1;
-        return { emissions: [] };
-      }),
-    ).rejects.toThrow("4-round tool limit");
-    expect(dispatches).toBe(4);
-    expect(mock.toolOutputSubmissions).toBe(4);
+    await expect(ai.decide(context(), testTools)).rejects.toThrow(
+      "invalid argument type for options",
+    );
     database.close();
   });
 
@@ -561,18 +407,18 @@ describe("Backboard state machine", () => {
     openServers.push(mock);
     const database = new Database(":memory:");
     const ai = new BackboardAI(database, config(`${mock.server.url}api`));
-    await expect(ai.classify(context())).rejects.toThrow("503 UNAVAILABLE");
+    await expect(ai.decide(context(), testTools)).rejects.toThrow(
+      "503 UNAVAILABLE",
+    );
     database.close();
   });
 
-  test("forgets remote and local chat state after remote deletion succeeds", async () => {
+  test("forgets remote and local legacy chat state after remote deletion succeeds", async () => {
     const mock = startMock();
     openServers.push(mock);
     const database = new Database(":memory:");
     const ai = new BackboardAI(database, config(`${mock.server.url}api`));
-    await ai.plan(context(), null, [noReplyTool], async () => ({
-      emissions: [],
-    }));
+    seedLegacySessions(database, ["chat-a"]);
     await ai.forget("chat-a");
     expect(mock.deletedThreads).toContain("planner-thread-1");
     expect(mock.deletedAssistants).toContain("planner-assistant-1");
@@ -584,16 +430,22 @@ describe("Backboard state machine", () => {
     database.close();
   });
 
+  test("forget is a no-op for chats without legacy state", async () => {
+    const mock = startMock();
+    openServers.push(mock);
+    const database = new Database(":memory:");
+    const ai = new BackboardAI(database, config(`${mock.server.url}api`));
+    await ai.forget("chat-a");
+    expect(mock.requests).toEqual([]);
+    database.close();
+  });
+
   test("retries partial forget after restart and preserves another chat", async () => {
     const mock = startMock("forget-partial");
     openServers.push(mock);
     const database = new Database(":memory:");
     const ai = new BackboardAI(database, config(`${mock.server.url}api`));
-    for (const chatId of ["chat-a", "chat-b"]) {
-      await ai.plan(context(chatId), null, [noReplyTool], async () => ({
-        emissions: [],
-      }));
-    }
+    seedLegacySessions(database, ["chat-a", "chat-b"]);
 
     await expect(ai.forget("chat-a")).rejects.toThrow("synthetic unavailable");
     expect(
@@ -605,14 +457,6 @@ describe("Backboard state machine", () => {
       config(`${mock.server.url}api`),
     );
     await restartedInstance.forget("chat-a");
-    await restartedInstance.plan(
-      context("chat-b"),
-      null,
-      [noReplyTool],
-      async () => ({
-        emissions: [],
-      }),
-    );
 
     expect(
       mock.deletedThreads.filter((threadId) => threadId === "planner-thread-1"),
@@ -630,7 +474,6 @@ describe("Backboard state machine", () => {
         thread_id: "planner-thread-2",
       },
     ]);
-    expect(mock.createdAssistants).toHaveLength(2);
     database.close();
   });
 
@@ -639,9 +482,7 @@ describe("Backboard state machine", () => {
     openServers.push(mock);
     const database = new Database(":memory:");
     const ai = new BackboardAI(database, config(`${mock.server.url}api`));
-    await ai.plan(context(), null, [noReplyTool], async () => ({
-      emissions: [],
-    }));
+    seedLegacySessions(database, ["chat-a"]);
 
     await expect(ai.forget("chat-a")).rejects.toThrow("synthetic unauthorized");
     expect(

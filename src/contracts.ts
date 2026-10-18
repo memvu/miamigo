@@ -94,6 +94,11 @@ export interface Classification {
   };
 }
 
+/** One model decision: the classification plus the single action to run locally. */
+export interface Decision extends Classification {
+  action: ToolIntent | null;
+}
+
 export interface ChatContext {
   chatId: string;
   now: number;
@@ -148,7 +153,6 @@ export interface AIConfig {
   classifierProvider: string;
   classifierModel: string;
   classifierId?: string;
-  plannerTemplateId?: string;
   botName: string;
   baseUrl?: string;
 }

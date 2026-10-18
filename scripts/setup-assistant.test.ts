@@ -41,7 +41,7 @@ test("reads and preserves existing environment settings before creating assistan
     await createAndSaveAssistantSettings(envPath, syntheticConfig, async () => {
       called = true;
       expect(await readFile(envPath, "utf8")).toBe(original);
-      return { classifierId: "new-classifier", plannerId: "new-planner" };
+      return { classifierId: "new-classifier" };
     });
 
     expect(called).toBe(true);
@@ -51,7 +51,7 @@ test("reads and preserves existing environment settings before creating assistan
         "BACKBOARD_MODEL=synthetic-model",
         "CUSTOM_SETTING=preserve-me",
         "BACKBOARD_CLASSIFIER_ID=new-classifier",
-        "BACKBOARD_ASSISTANT_ID=new-planner",
+        "BACKBOARD_ASSISTANT_ID=old-planner",
       ].join("\n"),
     );
   });
@@ -63,14 +63,11 @@ test("creates settings when the environment file is absent", async () => {
     await createAndSaveAssistantSettings(
       envPath,
       syntheticConfig,
-      async () => ({
-        classifierId: "new-classifier",
-        plannerId: "new-planner",
-      }),
+      async () => ({ classifierId: "new-classifier" }),
     );
 
     expect(await readFile(envPath, "utf8")).toBe(
-      "BACKBOARD_CLASSIFIER_ID=new-classifier\nBACKBOARD_ASSISTANT_ID=new-planner\n",
+      "BACKBOARD_CLASSIFIER_ID=new-classifier\n",
     );
   });
 });
@@ -81,7 +78,7 @@ test("does not create remote assistants or overwrite a path that cannot be read"
     await expect(
       createAndSaveAssistantSettings(directory, syntheticConfig, async () => {
         called = true;
-        return { classifierId: "new-classifier", plannerId: "new-planner" };
+        return { classifierId: "new-classifier" };
       }),
     ).rejects.toBeTruthy();
     expect(called).toBe(false);

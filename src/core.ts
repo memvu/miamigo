@@ -156,16 +156,23 @@ export class Core {
         this.explicit({ ...ctx, explicit: true });
         return;
       }
-      if (!this.bursts.pending.has(message.chatId))
-        this.bursts.receive(
-          message.chatId,
-          this.now(),
-          passesGate(
-            text,
-            this.planning.hasActive(message.chatId),
-            this.billing.hasOpen(message.chatId),
-          ),
+      const pending = this.bursts.pending.has(message.chatId);
+      const gated =
+        pending ||
+        passesGate(
+          text,
+          this.planning.hasActive(message.chatId),
+          this.billing.hasOpen(message.chatId),
         );
+      if (!pending) this.bursts.receive(message.chatId, this.now(), gated);
+      // Passive messages otherwise print nothing until the debounce ends, which reads as a hang.
+      this.log({
+        event: "passive",
+        chat: message.chatId,
+        status: gated
+          ? `deciding after ${Math.round(this.config.debounceMs / 1000)}s of quiet`
+          : "ignored: no active plan, planning word, or bill",
+      });
     } catch (error) {
       this.logError(error, "local", message.chatId);
       // Local parse/authorization failures are actionable replies, not invented model answers.
@@ -534,7 +541,8 @@ export class Core {
       };
       let ctx = this.context(chatId, last.handle, false, message);
       try {
-        if (burst.evaluated < version) {
+        // A failed early evaluation leaves no decision; retry once the lull arrives.
+        if (burst.evaluated < version || !decision) {
           decision = await this.ai.decide(ctx, tools);
           if (this.stopped || epoch !== (this.epochs.get(chatId) ?? 0)) return;
           this.planning.merge(ctx, decision);

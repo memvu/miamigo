@@ -241,6 +241,29 @@ describe("native event pipeline boundaries", () => {
     }
   });
 
+  test("a failed mid-burst decision is retried after the lull instead of dropped", async () => {
+    let calls = 0;
+    const f = fixture({
+      decide: async () => {
+        calls++;
+        if (calls === 1) throw new Error("503 UNAVAILABLE");
+        return silent;
+      },
+    });
+    try {
+      for (let index = 0; index < 8; index++) f.receive("dinner planning");
+      f.core.tick();
+      await f.core.idle();
+      expect(calls).toBe(1);
+      await f.advance(45_000);
+      expect(calls).toBe(2);
+      expect(f.logs.some((log) => log.event === "classification")).toBe(true);
+    } finally {
+      await f.core.stop();
+      f.store.close();
+    }
+  });
+
   test("passive API failures stay silent; explicit failures use the local error template", async () => {
     const f = fixture({
       decide: async () => {

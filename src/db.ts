@@ -29,6 +29,7 @@ export interface OutboxRow {
   text: string;
   event_key: string;
   tag_json: string | null;
+  attachments_json: string | null;
   proactive: number;
   stage_key: string;
   status: string;
@@ -70,7 +71,8 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS outbox (
         id INTEGER PRIMARY KEY, chat_id TEXT NOT NULL, text TEXT NOT NULL,
-        event_key TEXT NOT NULL UNIQUE, tag_json TEXT, proactive INTEGER NOT NULL DEFAULT 0,
+        event_key TEXT NOT NULL UNIQUE, tag_json TEXT, attachments_json TEXT,
+        proactive INTEGER NOT NULL DEFAULT 0,
         stage_key TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'queued',
         created_at INTEGER NOT NULL, sent_at INTEGER, guid TEXT, failure TEXT
       );
@@ -85,6 +87,11 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS chat_memories_chat ON chat_memories(chat_id);
     `);
+    try {
+      this.db.run("ALTER TABLE outbox ADD COLUMN attachments_json TEXT");
+    } catch {
+      // Column already present
+    }
     // A process crash after AppleScript dispatch has an uncertain outcome. Never replay it blindly.
     this.db.run(
       "UPDATE outbox SET status = 'failed', failure = 'Delivery interrupted; check Messages before resending.' WHERE status = 'sending'",
@@ -207,7 +214,7 @@ export class Store {
     return (
       this.db
         .query(
-          "INSERT OR IGNORE INTO outbox(chat_id,text,event_key,tag_json,proactive,stage_key,created_at) VALUES (?,?,?,?,?,?,?)",
+          "INSERT OR IGNORE INTO outbox(chat_id,text,event_key,tag_json,attachments_json,proactive,stage_key,created_at) VALUES (?,?,?,?,?,?,?,?)",
         )
         .run(
           emission.chatId,
@@ -216,6 +223,7 @@ export class Store {
           emission.tag
             ? JSON.stringify([{ ...emission.tag, key: emission.key }])
             : null,
+          emission.attachments ? JSON.stringify(emission.attachments) : null,
           Number(proactive),
           stageKey,
           now,

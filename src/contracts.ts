@@ -127,6 +127,7 @@ export interface Emission {
   text: string;
   key: string;
   tag?: DeliveryTag;
+  attachments?: string[];
 }
 
 export interface ActionResult {

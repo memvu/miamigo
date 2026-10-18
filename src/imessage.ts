@@ -157,8 +157,12 @@ export class NativeIMessage {
     });
   }
 
-  async send(chatId: string, text: string): Promise<void> {
-    await this.sdk.send({ to: chatId, text });
+  async send(
+    chatId: string,
+    text: string,
+    attachments?: string[],
+  ): Promise<void> {
+    await this.sdk.send({ to: chatId, text, attachments });
   }
 
   async close(): Promise<void> {

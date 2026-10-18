@@ -21,6 +21,8 @@ const BILL_TOOLS = new Set([
   "get_balances",
   "settle_bill",
   "forgive_share",
+  "export_spreadsheet",
+  "nudge_debtors",
 ]);
 
 export class Core {
@@ -41,7 +43,11 @@ export class Core {
     private readonly planning: Planning,
     private readonly billing: Billing,
     private readonly ai: Pick<BackboardAI, "decide" | "forget">,
-    private readonly send: (chatId: string, text: string) => Promise<void>,
+    private readonly send: (
+      chatId: string,
+      text: string,
+      attachments?: string[],
+    ) => Promise<void>,
     private readonly log: (event: Record<string, unknown>) => void,
     private readonly now: () => number = Date.now,
   ) {
@@ -248,8 +254,13 @@ export class Core {
       case "help":
         this.reply(
           message,
-          "👋 Mi Amigo helps this group plan and split bills.\n/plan /poll /status /remind /cancel · /quiet /loud\n/split amount /paid [name] /owe /settle /forgive name\n/memories · /remember <fact> · /forget",
+          "👋 Mi Amigo helps this group plan and split bills.\n/plan /poll /status /remind /invite (Calendar .ics) /cancel · /quiet /loud\n/split amount /paid [name] /owe /nudge /settle /forgive name\n/sheet (Excel export) · /memories · /remember <fact> · /forget",
         );
+        return;
+      case "invite":
+      case "calendar":
+      case "event":
+        this.queue(this.planning.execute("export_invite", {}, ctx));
         return;
       case "status":
         this.queue(this.planning.execute("get_poll_status", {}, ctx));
@@ -276,6 +287,15 @@ export class Core {
         this.queue(
           this.billing.execute("forgive_share", { person: args }, ctx),
         );
+        return;
+      case "sheet":
+      case "excel":
+      case "spreadsheet":
+        this.queue(this.billing.execute("export_spreadsheet", {}, ctx));
+        return;
+      case "nudge":
+      case "remind-bill":
+        this.queue(this.billing.execute("nudge_debtors", {}, ctx));
         return;
       case "memories": {
         const list = this.store.memories(ctx.chatId);
@@ -512,9 +532,15 @@ export class Core {
     }
     const key = `proactive:${ctx.chatId}:${lastRow}:${stageKey}`;
     const text = result.emissions.map((emission) => emission.text).join("\n");
+    const attachments = result.emissions.flatMap((e) => e.attachments ?? []);
     if (
       !this.store.queue(
-        { chatId: ctx.chatId, text, key },
+        {
+          chatId: ctx.chatId,
+          text,
+          key,
+          attachments: attachments.length > 0 ? attachments : undefined,
+        },
         this.now(),
         true,
         stageKey,
@@ -770,10 +796,18 @@ export class Core {
           )
           .run(row.id);
         try {
-          await this.send(row.chat_id, row.text);
+          const attachments = row.attachments_json
+            ? (JSON.parse(row.attachments_json) as string[])
+            : undefined;
+          await this.send(row.chat_id, row.text, attachments);
           this.store.sent(row, this.now());
           this.deliverTags(this.store.tags(row), undefined, this.now());
-          this.log({ event: "sent", chat: row.chat_id, text: row.text });
+          this.log({
+            event: "sent",
+            chat: row.chat_id,
+            text: row.text,
+            ...(attachments ? { attachments } : {}),
+          });
         } catch (error) {
           this.store.db
             .query("UPDATE outbox SET status='failed',failure=? WHERE id=?")

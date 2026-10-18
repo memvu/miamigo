@@ -69,7 +69,7 @@ async function main(): Promise<void> {
       planning,
       billing,
       ai,
-      (chatId, text) => transport.send(chatId, text),
+      (chatId, text, attachments) => transport.send(chatId, text, attachments),
       log,
     );
     const app = core;

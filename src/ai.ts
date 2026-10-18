@@ -152,6 +152,9 @@ Use only participants, times, places, and amounts present in the context. Do not
 Set action to null when no action is justified. Choose at most one action and keep its args valid for that tool's parameters.
 When explicit is true, someone addressed the bot directly: choose the action that answers their request even if should_speak is false.
 When someone suggests a plan (e.g. "Plan dinner", "let's hang"), choose create_poll asking who is joining, with title and what set when there is no active_plan. If known_memories has dietary restrictions or allergies (e.g. peanut allergy, vegan), explicitly acknowledge it in the question (e.g. "Who's in for dinner? (keeping it peanut-free)" or "Who's in for vegan-friendly dinner?").
+When someone asks for an expense spreadsheet, excel sheet, or breakdown of bills (e.g. "show the spreadsheet", "export bills", "send excel sheet", "generate spreadsheet"), choose export_spreadsheet.
+When someone asks to remind or nudge people about bills, owes, or payments (e.g. "remind everyone who owes", "nudge people to pay", "send payment reminders"), choose nudge_debtors.
+When someone asks for a calendar invite, calendar event, or event file (e.g. "send calendar invite", "create calendar event", "send invite", "/invite", "/calendar"), choose export_invite.
 Detect a new bill only in new_messages.
 Set bill.paid_by and bill.fixed_shares from [new message] only.
 Attribute each report to the sender shown in [new message].

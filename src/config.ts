@@ -68,6 +68,6 @@ export function loadConfig(
       env.MESSAGES_DATABASE_PATH ||
       resolve(homedir(), "Library/Messages/chat.db"),
     contactsPath: resolve(root, env.CONTACTS_PATH || "contacts.json"),
-    allowDMs: env.ALLOW_DMS === "true",
+    allowDMs: env.ALLOW_DMS !== "false",
   };
 }

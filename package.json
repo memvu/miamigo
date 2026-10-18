@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "@spectrum-ts/imessage-local": "^12.11.0",
+    "backboard-sdk": "^1.5.19",
+    "spectrum-ts": "^12.11.0"
+  }
+}

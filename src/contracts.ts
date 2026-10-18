@@ -81,6 +81,7 @@ export interface Classification {
     location?: string;
     starts_at?: string;
     objection?: boolean;
+    memories?: string[];
   };
   bill?: {
     is_shared_expense: boolean;
@@ -112,6 +113,7 @@ export interface ChatContext {
   plan: PlanSnapshot | null;
   bills: unknown;
   message?: IncomingMessage;
+  memories?: string[];
 }
 
 export interface DeliveryTag {

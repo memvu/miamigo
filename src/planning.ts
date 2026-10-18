@@ -143,7 +143,7 @@ const ReminderSchema = z.object({
 
 const ClarifySchema = z.object({
   question: z.string().trim().min(1),
-  options: z.array(z.string().trim().min(1)).min(2).max(4),
+  options: z.array(z.string().trim().min(1)).min(2).max(4).optional(),
 });
 
 function parseJsonArray(value: string | null | undefined): string[] {
@@ -832,6 +832,9 @@ export class Planning {
         );
         return plan.stage === "locked" && current?.key === event.key;
       }
+      if (event.key.includes("clarify:") || event.key.startsWith("clarify:")) {
+        return true;
+      }
       return event.key === `plan:${tag.id}:kickoff`;
     }
     return true;
@@ -1306,15 +1309,13 @@ export class Planning {
   ): ActionResult {
     const parsed = ClarifySchema.safeParse(args);
     if (!parsed.success) {
-      throw new Error(
-        "ask_clarify requires one question and two to four options.",
-      );
+      throw new Error("ask_clarify requires a question.");
     }
-    const options = uniqueStrings(parsed.data.options);
-    if (options.length < 2) {
-      throw new Error("ask_clarify options must be distinct.");
-    }
-    const text = `🤔 Quick q: ${parsed.data.question}\n${options.map((option, index) => `${index + 1}) ${option}`).join("  ")}`;
+    const options = parsed.data.options ? uniqueStrings(parsed.data.options) : [];
+    const text =
+      options.length >= 2
+        ? `Quick question: ${parsed.data.question}\n${options.map((option, index) => `${index + 1}) ${option}`).join("\n")}`
+        : parsed.data.question;
     const plan = this.activePlan(ctx.chatId);
     const resourceId = plan?.id ?? 0;
     const emission = this.delivery(
@@ -2523,10 +2524,10 @@ export const planningTools: ToolDefinition[] = [
     type: "function",
     function: {
       name: "ask_clarify",
-      description: "Ask one fixed-format question with two to four options.",
+      description: "Send a reminder, clarification note, or question to the group chat.",
       parameters: {
         type: "object",
-        required: ["question", "options"],
+        required: ["question"],
         properties: {
           question: { type: "string" },
           options: {

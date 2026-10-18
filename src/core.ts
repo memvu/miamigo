@@ -72,6 +72,7 @@ export class Core {
       plan: this.planning.snapshot(chatId),
       bills: this.billing.snapshot(chatId),
       message,
+      memories: this.store.memories(chatId),
     };
   }
 
@@ -247,7 +248,7 @@ export class Core {
       case "help":
         this.reply(
           message,
-          "👋 Mi Amigo helps this group plan and split bills.\n/plan /poll /status /remind /cancel · /quiet /loud\n/split amount /paid [name] /owe /settle /forgive name · /forget\nSelected text is printed to the terminal and retained in SQLite for 7 days; terminal captures are not auto-pruned. Gated context goes to Backboard. /forget deletes this chat's saved state and AI memory, not terminal history.",
+          "👋 Mi Amigo helps this group plan and split bills.\n/plan /poll /status /remind /cancel · /quiet /loud\n/split amount /paid [name] /owe /settle /forgive name\n/memories · /remember <fact> · /forget",
         );
         return;
       case "status":
@@ -276,6 +277,33 @@ export class Core {
           this.billing.execute("forgive_share", { person: args }, ctx),
         );
         return;
+      case "memories": {
+        const list = this.store.memories(ctx.chatId);
+        if (list.length === 0) {
+          this.reply(
+            message,
+            "🧠 No group memories saved yet. State preferences naturally (e.g. 'I'm vegan') or use /remember <fact>.",
+          );
+        } else {
+          this.reply(
+            message,
+            `🧠 Group memories:\n${list.map((m) => `• ${m}`).join("\n")}`,
+          );
+        }
+        return;
+      }
+      case "remember": {
+        if (!args.trim()) {
+          this.reply(
+            message,
+            "Usage: /remember <fact> (e.g. /remember Alex is vegetarian)",
+          );
+          return;
+        }
+        this.store.addMemory(ctx.chatId, args.trim(), this.now());
+        this.reply(message, `🧠 Saved memory: ${args.trim()}`);
+        return;
+      }
       case "split": {
         const amount = /^\$?(\d+(?:\.\d{1,2})?)(?:\s+(.*))?$/.exec(args);
         if (!amount) {
@@ -546,6 +574,19 @@ export class Core {
           decision = await this.ai.decide(ctx, tools);
           if (this.stopped || epoch !== (this.epochs.get(chatId) ?? 0)) return;
           this.planning.merge(ctx, decision);
+          if (
+            decision.extracted.memories &&
+            decision.extracted.memories.length > 0
+          ) {
+            for (const mem of decision.extracted.memories) {
+              this.store.addMemory(chatId, mem, this.now());
+              this.log({
+                event: "memory",
+                chat: chatId,
+                fact: mem,
+              });
+            }
+          }
           const lastProactive = this.store.chat(chatId).last_proactive_at;
           const engagedHandles = new Set([
             ...decision.extracted.interested,

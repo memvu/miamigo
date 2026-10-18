@@ -8,7 +8,7 @@ const BILL_WORD =
 const AMOUNT = /\$?\d+(?:\.\d{1,2})?\b/;
 const PAYMENT = /\b(paid|sent|venmo'?d|owe|tip)\b/i;
 const VALUE_REASON =
-  /stall|conflict|option|converg|waiting|majority|ready|agree|bill|expense|payment|tip|suggestion|start|kickoff|new plan|input|poll|participat|rally|initial|join|dinner|lunch|hang|food|party|meet|no.{0,30}(time|place|proposal)/i;
+  /stall|conflict|option|converg|waiting|majority|ready|agree|bill|expense|payment|tip|suggest|alternat|destinat|place|vegas|trip|where|change|pivot|switch|instead|start|kickoff|new plan|input|poll|participat|rally|initial|join|dinner|lunch|hang|food|party|meet|no.{0,30}(time|place|proposal)/i;
 
 export function passesGate(
   text: string,
@@ -34,86 +34,50 @@ export function dayKey(now: number, tz: string): string {
 
 export function speakingPolicy(input: {
   chat: ChatState;
-  decision: Classification;
+  decision: Decision | Classification;
   plan: PlanSnapshot | null;
   now: number;
   lastMessageAt: number;
   debounceMs: number;
-  recentCount: number;
-  participantCount: number;
+  recentCount?: number;
+  participantCount?: number;
 }): { allow: boolean; reason: string; stageKey: string; bill: boolean } {
-  const {
-    chat,
-    decision,
-    plan,
-    now,
-    lastMessageAt,
-    debounceMs,
-    recentCount,
-    participantCount,
-  } = input;
+  const { chat, decision, plan, now, lastMessageAt, debounceMs } = input;
   const bill =
     decision.bill?.is_shared_expense === true &&
     decision.bill.confidence >= 0.8;
   const stageKey = plan ? `${plan.id}:${plan.stage}` : "none";
   let reason = "allowed";
-  if (chat.quiet_until > now) reason = "quiet";
-  else if (now - lastMessageAt < debounceMs) reason = "mid-burst";
-  else if (chat.unanswered_count >= 2) reason = "unanswered-backoff";
-  else if (
-    chat.proactive_day === dayKey(now, chat.tz) &&
-    chat.proactive_today >= 4
-  )
-    reason = "daily-budget";
-  else if (
+
+  if (chat.quiet_until > now) {
+    reason = "quiet";
+  } else if (now - lastMessageAt < debounceMs) {
+    reason = "mid-burst";
+  } else if (chat.unanswered_count >= 2) {
+    reason = "unanswered-backoff";
+  } else if (
     !bill &&
     (!decision.is_planning ||
       decision.confidence < 0.7 ||
       !decision.should_speak)
-  )
+  ) {
     reason = "confidence-or-silence";
-  else if (
-    !bill &&
-    (!decision.reason.trim() || !VALUE_REASON.test(decision.reason))
-  )
-    reason = "no-concrete-value";
-  else if (
+  } else if (
     !bill &&
     plan &&
     (plan.stage === "locked" ||
       plan.stage === "done" ||
       plan.stage === "cancelled")
-  )
+  ) {
     reason = "silent-stage";
-  else if (!bill && chat.spoke_stage === stageKey) reason = "stage-budget";
-  else if (
-    !bill &&
-    plan?.stage === "gathering" &&
-    recentCount < 10 &&
-    now - plan.stageChangedAt < 20 * 60_000 &&
-    !/suggestion|kickoff|start|new plan|initial|join/i.test(decision.reason)
-  )
-    reason = "not-stalled";
-  else if (
-    !bill &&
-    plan?.stage === "choosing_time" &&
-    plan.timeOptions.length < 2 &&
-    Object.keys(plan.availability).length <= participantCount / 2
-  )
-    reason = "no-time-conflict";
-  else if (
-    !bill &&
-    plan?.stage === "choosing_place" &&
-    plan.placeOptions.length < 3 &&
-    recentCount < 8
-  )
-    reason = "no-place-conflict";
-  else if (
+  } else if (
     !bill &&
     plan?.stage === "ready_to_lock" &&
     (!plan.location || !plan.startsAt)
-  )
+  ) {
     reason = "incomplete-lock";
+  }
+
   return { allow: reason === "allowed", reason, stageKey, bill };
 }
 

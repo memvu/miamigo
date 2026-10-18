@@ -41,7 +41,10 @@ export function loadConfig(
   const model = required("BACKBOARD_MODEL");
   return {
     ai: {
-      apiKey: required("BACKBOARD_API_KEY"),
+      apiKey:
+        provider === "omp"
+          ? env.BACKBOARD_API_KEY?.trim() || "omp-local"
+          : required("BACKBOARD_API_KEY"),
       provider,
       model,
       classifierProvider: env.BACKBOARD_CLASSIFIER_PROVIDER?.trim() || provider,

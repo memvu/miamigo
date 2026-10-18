@@ -60,6 +60,10 @@ const extractedSchema = z
       .nullish()
       .transform((value) => value ?? undefined),
     objection: z.boolean().optional(),
+    memories: z
+      .array(z.string().trim().min(1))
+      .nullish()
+      .transform((value) => value ?? undefined),
   })
   .strict();
 
@@ -118,7 +122,8 @@ const CLASSIFIER_SCHEMA_DESCRIPTION = `{
     "title": "optional title" or null,
     "location": "optional location" or null,
     "starts_at": "optional date/time text" or null,
-    "objection": boolean
+    "objection": boolean,
+    "memories": ["any newly learned permanent dietary rules, allergies, or preferences from messages, e.g. 'Alex is vegan'"]
   },
   "bill": {
     "is_shared_expense": boolean,
@@ -146,11 +151,18 @@ Choose action from the tool catalog below. The app is the source of truth and re
 Use only participants, times, places, and amounts present in the context. Do not calculate money yourself.
 Set action to null when no action is justified. Choose at most one action and keep its args valid for that tool's parameters.
 When explicit is true, someone addressed the bot directly: choose the action that answers their request even if should_speak is false.
-When someone suggests a plan (e.g. "Plan dinner", "let's hang"), choose create_poll asking who is joining, with title and what set when there is no active_plan (e.g. title: "Dinner", what: "dinner", question: "Who's in for dinner?", options: ["I'm in", "Can't make it"], closes_at: "tomorrow at 9pm").
+When someone suggests a plan (e.g. "Plan dinner", "let's hang"), choose create_poll asking who is joining, with title and what set when there is no active_plan. If known_memories has dietary restrictions or allergies (e.g. peanut allergy, vegan), explicitly acknowledge it in the question (e.g. "Who's in for dinner? (keeping it peanut-free)" or "Who's in for vegan-friendly dinner?").
 Detect a new bill only in new_messages.
 Set bill.paid_by and bill.fixed_shares from [new message] only.
 Attribute each report to the sender shown in [new message].
 Never use an older report from recent_messages or new_messages as the newest sender's report.
+Extract any newly mentioned personal preferences, dietary restrictions, or schedule constraints into extracted.memories as short facts (e.g. "I'm vegan" -> ["Alex is vegan"]).
+CRITICAL MEMORY INSTRUCTION: Always check known_memories. If any participant has an allergy or dietary restriction, actively state it in poll questions and strictly avoid restricted foods/places when proposing options.
+FOOD CONFLICT & SAFETY INTERVENTION:
+If a participant suggests, insists on, or jokes about food that directly conflicts with an allergy or restriction in known_memories (e.g. insisting on peanuts when someone has a peanut allergy):
+1. ALWAYS set should_speak: true. Never dismiss allergy conflicts as banter, even if an existing poll is already open.
+2. Intervene immediately by calling ask_clarify with ONLY the question stating the reminder/alert (do NOT add options—keep numbered options only for actual polls when planning dates, places, or attendees).
+Example: ask_clarify({ question: "Heads up: someone has a peanut allergy!" })
 Few-shot examples:
 1. Banter
 Context: Alex: "lol that cat is huge"; Jess: "I know right"
@@ -286,6 +298,12 @@ export function buildAiContext(ctx: ChatContext): string {
     )}`,
     `active_plan: ${jsonForPrompt(ctx.plan)}`,
     `bills: ${jsonForPrompt(ctx.bills)}`,
+    ...(ctx.memories && ctx.memories.length > 0
+      ? [
+          "known_memories (remembered group preferences & rules):",
+          ...ctx.memories.map((m) => `- ${m}`),
+        ]
+      : []),
     "recent_messages (last 20, context only):",
     ...recentLines,
     "new_messages (since last evaluation):",
@@ -319,8 +337,12 @@ function parseModelJson(content: string | null): unknown {
   if (content === null || !content.trim()) {
     throw new Error("Classifier returned no JSON content.");
   }
+  const clean = content
+    .replace(/^```(?:json)?\s*/iu, "")
+    .replace(/\s*```$/iu, "")
+    .trim();
   try {
-    return JSON.parse(content);
+    return JSON.parse(clean);
   } catch {
     throw new Error("Classifier returned invalid JSON.");
   }
@@ -592,8 +614,35 @@ export class BackboardAI {
   /** One stateless JSON call returns both the classification and the action to run. */
   async decide(ctx: ChatContext, tools: ToolDefinition[]): Promise<Decision> {
     const content = buildAiContext(ctx);
-    const response = await this.llmCall("decider", async () =>
-      asChatResponse(
+    const contentText = await this.llmCall("decider", async () => {
+      if (
+        this.config.provider === "omp" ||
+        this.config.classifierProvider === "omp"
+      ) {
+        const prompt = `${deciderSystemPrompt(tools)}\n\n${content}`;
+        const proc = Bun.spawn(
+          [
+            "omp",
+            "-p",
+            "--no-session",
+            "--no-tools",
+            "--thinking",
+            "off",
+            prompt,
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        const [stdout, stderr] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
+        const exitCode = await proc.exited;
+        if (exitCode !== 0) {
+          throw new Error(`omp -p failed (exit ${exitCode}): ${stderr}`);
+        }
+        return stdout;
+      }
+      const response = asChatResponse(
         await this.client.sendMessage({
           assistantId: this.requireClassifierId(),
           systemPrompt: deciderSystemPrompt(tools),
@@ -604,22 +653,22 @@ export class BackboardAI {
           json_output: true,
           memory: "off",
         }),
-      ),
-    );
-    // The thread is single-use; deleting it in the background keeps it off the reply path.
-    if (response.threadId) {
-      this.client.deleteThread(response.threadId).catch(() => undefined);
-    }
-    requireCompleted(response);
-    if (response.status !== "COMPLETED") {
-      throw new Error(
-        `Classifier generation is not complete (status: ${response.status ?? "missing"}).`,
       );
-    }
-    if (response.toolCalls?.length) {
-      throw new Error("Classifier unexpectedly requested a tool action.");
-    }
-    return parseDecision(response.content, ctx.participants, tools);
+      if (response.threadId) {
+        this.client.deleteThread(response.threadId).catch(() => undefined);
+      }
+      requireCompleted(response);
+      if (response.status !== "COMPLETED") {
+        throw new Error(
+          `Classifier generation is not complete (status: ${response.status ?? "missing"}).`,
+        );
+      }
+      if (response.toolCalls?.length) {
+        throw new Error("Classifier unexpectedly requested a tool action.");
+      }
+      return response.content ?? "";
+    });
+    return parseDecision(contentText, ctx.participants, tools);
   }
 
   private getSession(chatId: string): AiSessionRow | null {
